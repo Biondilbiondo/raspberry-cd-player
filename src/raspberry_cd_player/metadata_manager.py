@@ -37,17 +37,21 @@ import re
 import subprocess
 import discid
 import musicbrainzngs
+import configparser
 
 import requests
 
 log = logging.getLogger("metadata")
-musicbrainzngs.set_useragent("raspberry-cd-player", "0.1", "none")
 
+config = configparser.ConfigParser()
+config.read('config.ini')
+
+CD_VAULT = config.get('storage', 'cd_vault')
 # ── Paths ─────────────────────────────────────────────────────────────────────
-_DATA_DIR      = os.path.expanduser("~/.local/share/musicplayer")
-CACHE_DIR      = os.path.expanduser("~/.cache/musicplayer/art")
+_DATA_DIR      = config.get('storage', 'database_directory')
+CACHE_DIR      = config.get('storage', 'art_cache')
 CACHE_DB       = os.path.join(_DATA_DIR, "disc_cache.db")
-OVERRIDES_FILE = "/opt/musicplayer/disc_overrides.json"
+OVERRIDES_FILE = config.get('storage', 'overrides_file')
 os.makedirs(CACHE_DIR, exist_ok=True)
 os.makedirs(_DATA_DIR, exist_ok=True)
 
@@ -58,9 +62,14 @@ ITUNES_URL   = "https://itunes.apple.com/search"
 DEEZER_URL   = "https://api.deezer.com/search/album"
 DISCOGS_BASE = "https://api.discogs.com"
 
+MB_AGENT = config.get('musicbrainz', 'agent') 
+MB_VERSION = config.get('musicbrainz', 'version')
+MB_MAIL = config.get('musicbrainz', 'mail')
+musicbrainzngs.set_useragent(MB_AGENT, MB_VERSION, MB_MAIL)
+
 HEADERS = {
-    "User-Agent": "HiFiBerryMusicPlayer/2.0 (hifiberry@localhost)",
-    "Accept":     "application/json",
+    "User-Agent": f"{MB_AGENT}/{MB_VERSION} ({MB_MAIL})",
+    "Accept":      "application/json",
 }
 DISCOGS_TOKEN = os.environ.get("DISCOGS_TOKEN", "")
 

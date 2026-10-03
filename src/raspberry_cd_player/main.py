@@ -9,8 +9,12 @@ import time
 import threading
 import logging
 import os
+import configparser
 
-CD_VAULT = os.path.expanduser("~/cd_vault")
+config = configparser.ConfigParser()
+config.read('config.ini')
+
+CD_VAULT = config.get('storage', 'cd_vault')
 VAULT_AUDIO_EXTS = {".flac", ".wav", ".mp3", ".ogg", ".m4a"}
 
 import pygame

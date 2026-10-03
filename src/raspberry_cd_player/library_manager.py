@@ -32,10 +32,14 @@ import logging
 import os
 import re
 from typing import List, Dict, Optional
+import configparser
 
 log = logging.getLogger("library")
 
-LIBRARY_ROOT = os.environ.get("MUSIC_LIBRARY", os.path.expanduser("./"))
+config = configparser.ConfigParser()
+config.read('config.ini')
+
+LIBRARY_ROOT = config.get('storage', 'library_root')
 LIBRARY_JSON = os.path.join(LIBRARY_ROOT, "library.json")
 
 AUDIO_EXTENSIONS = {".flac", ".wav", ".aiff", ".aif", ".alac", ".mp3", ".ogg", ".m4a"}

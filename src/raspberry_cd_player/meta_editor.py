@@ -18,16 +18,22 @@ import subprocess
 import threading
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, HTTPServer
+import configparser
+
+config = configparser.ConfigParser()
+config.read('config.ini')
 
 PORT           = 8080
-CACHE_DB       = os.path.expanduser("~/.local/share/musicplayer/disc_cache.db")
-CACHE_DIR      = os.path.expanduser("~/.cache/musicplayer/art")
-OVERRIDES_FILE = "/opt/musicplayer/disc_overrides.json"
+_DATA_DIR      = config.get('storage', 'database_dir')
+CACHE_DB       = os.path.join(_DATA_DIR, "disc_cache.db")
+CACHE_DIR      = config.get('storage', 'art_cache')
+OVERRIDES_FILE = config.get('storage', 'overrides_file')
 CURRENT_DISC   = "/tmp/musicplayer_current_disc"
 VAULT_KEY_FILE = "/tmp/musicplayer_vault_key"
-CD_VAULT       = os.path.expanduser("~/cd_vault")
-MUSIC_DIR      = os.environ.get("MUSIC_LIBRARY", os.path.expanduser("~/music"))
-LIBRARY_JSON   = os.path.join(MUSIC_DIR, "library.json")
+CD_VAULT       = config.get('storage', 'vault_dir')
+MUSIC_DIR      = config.get('storage', 'music_dir')
+LIBRARY_ROOT = config.get('storage', 'library_dir')
+LIBRARY_JSON = os.path.join(LIBRARY_ROOT, "library.json")
 
 # ── Rip state (single global, one rip at a time) ──────────────────────────────
 _rip_lock   = threading.Lock()
@@ -268,12 +274,6 @@ def _do_rip(vault_dir: str, num_tracks: int):
     have_ffmpeg = bool(shutil.which("ffmpeg"))
 
     try:
-        # Stop services so MPV doesn't conflict with the daemon
-        subprocess.run(["sudo", "systemctl", "stop", "musicplayer.service"],
-                       timeout=12, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        subprocess.run(["sudo", "systemctl", "stop", "mpv.service"],
-                       timeout=12, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
         for track in range(num_tracks):
             with _rip_lock:
                 if not _rip_status["running"]:
@@ -343,13 +343,6 @@ def _do_rip(vault_dir: str, num_tracks: int):
 
     except Exception as exc:
         _set(error=str(exc), done=True, running=False)
-
-    finally:
-        # Always restart services
-        subprocess.run(["sudo", "systemctl", "start", "mpv.service"],
-                       timeout=15, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        subprocess.run(["sudo", "systemctl", "start", "musicplayer.service"],
-                       timeout=15, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 # ── HTML ──────────────────────────────────────────────────────────────────────

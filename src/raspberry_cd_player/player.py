@@ -21,18 +21,18 @@ from typing import Any, Optional
 # libmpv requires the C numeric locale; must be set before importing mpv.
 locale.setlocale(locale.LC_NUMERIC, "C")
 import mpv  # noqa: E402
+import configparser
 
 log = logging.getLogger("player")
+config = configparser.ConfigParser()
+config.read('config.ini')
 
-IPC_SOCKET = "/tmp/mpv_ipc.sock"          # set to None to disable
-AUDIO_DEVICE = os.environ.get("MPV_AUDIO_DEVICE", "auto")  # e.g. "alsa/hifiberry"
-CD_DEVICE_URI = "cdda:///dev/sr0"
-CD_OPEN_TIMEOUT = 10.0                    # seconds to wait for the disc to open
+CD_DEVICE_URI = config.get('cd', 'cd_device_uri')
+CD_OPEN_TIMEOUT = config.get('cd', 'cd_open_timeout')
 
 VOLUME_STEP = 5   # percent per button press
 VOLUME_MIN  = 0
 VOLUME_MAX  = 100
-
 
 class Player:
     def __init__(self):
@@ -43,14 +43,11 @@ class Player:
         log.info("Initialising player (python-mpv)…")
         opts = dict(
             video=False,
-            audio_device=AUDIO_DEVICE,
             idle=True,             # stay alive with nothing loaded
             volume=self._volume,
             log_handler=self._on_mpv_log,
             loglevel="warn",
         )
-        if IPC_SOCKET:
-            opts["input_ipc_server"] = IPC_SOCKET
         self._mpv = mpv.MPV(**opts)
 
     # ── Helpers ───────────────────────────────────────────────────────────────
