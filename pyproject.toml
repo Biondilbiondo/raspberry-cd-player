@@ -1,0 +1,23 @@
+[project]
+name = "raspberry-cd-player"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Mattia Bondanza", email = "mattia.bondanza@inventati.org" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "discid>=1.4.2",
+    "mpv>=1.0.8",
+    "musicbrainzngs>=0.7.1",
+    "pygame>=2.6.1",
+    "requests>=2.34.2",
+]
+
+[project.scripts]
+raspberry-cd-player = "raspberry_cd_player:main"
+
+[build-system]
+requires = ["uv_build>=0.12.17,<0.13.0"]
+build-backend = "uv_build"

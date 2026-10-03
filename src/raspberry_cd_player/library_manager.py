@@ -35,7 +35,7 @@ from typing import List, Dict, Optional
 
 log = logging.getLogger("library")
 
-LIBRARY_ROOT = os.environ.get("MUSIC_LIBRARY", os.path.expanduser("~/music"))
+LIBRARY_ROOT = os.environ.get("MUSIC_LIBRARY", os.path.expanduser("./"))
 LIBRARY_JSON = os.path.join(LIBRARY_ROOT, "library.json")
 
 AUDIO_EXTENSIONS = {".flac", ".wav", ".aiff", ".aif", ".alac", ".mp3", ".ogg", ".m4a"}

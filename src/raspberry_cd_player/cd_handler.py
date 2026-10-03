@@ -11,8 +11,8 @@ import hashlib
 import logging
 import os
 import subprocess
+import discid
 
-MOUNT_POINT  = "/mnt/cdrom"
 AUDIO_EXTS   = {".mp3", ".flac", ".ogg", ".m4a", ".wav", ".aac", ".wma"}
 
 log = logging.getLogger("cd_handler")
@@ -26,7 +26,7 @@ CD_SPEED = 4
 
 
 class CDHandler:
-    def __init__(self, device: str = "/dev/sr0"):
+    def __init__(self, device: str = discid.get_default_device()):
         self.device = device
 
     def is_disc_present(self) -> bool:
@@ -54,9 +54,13 @@ class CDHandler:
 
     def get_disc_id(self) -> str | None:
         try:
-            return subprocess.check_output(
-                ["/usr/bin/cd-discid", self.device], timeout=8
-            ).decode().strip()
+            disc = discid.read(self.device)
+            offsets = [t.offset for t in disc.tracks]
+            total_seconds = disc.sectors // 75  # leadout offset / 75
+            out = f"{disc.freedb_id} {len(disc.tracks)} "
+            out += " ".join([str(a) for a in offsets])
+            out += f" {total_seconds}"
+            return out
         except Exception as e:
             log.error("cd-discid failed: %s", e)
             return None
@@ -97,63 +101,6 @@ class CDHandler:
         except Exception as e:
             log.debug("blkid check: %s", e)
             return False
-
-    def mount(self) -> str:
-        """Mount /dev/sr0 to /mnt/cdrom. Returns mount point or ''."""
-        # Already mounted?
-        try:
-            out = subprocess.check_output(
-                ["findmnt", "-n", "-o", "TARGET", self.device], timeout=5
-            ).decode().strip()
-            if out:
-                return out
-        except Exception:
-            pass
-        try:
-            subprocess.run(
-                ["sudo", "/bin/mount", self.device, MOUNT_POINT],
-                check=True, timeout=10,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
-            log.info("Mounted %s at %s", self.device, MOUNT_POINT)
-            return MOUNT_POINT
-        except Exception as e:
-            log.error("Mount failed: %s", e)
-            return ""
-
-    def unmount(self):
-        """Unmount /dev/sr0 if mounted."""
-        try:
-            mp = subprocess.check_output(
-                ["findmnt", "-n", "-o", "TARGET", self.device], timeout=5
-            ).decode().strip()
-            if not mp:
-                return
-        except Exception:
-            return
-        try:
-            subprocess.run(
-                ["sudo", "/bin/umount", self.device],
-                check=False, timeout=10,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
-            log.info("Unmounted %s", self.device)
-        except Exception as e:
-            log.debug("Unmount failed: %s", e)
-
-    def get_data_files(self) -> list[str]:
-        """Mount disc and return sorted list of audio file paths, or []."""
-        mp = self.mount()
-        if not mp:
-            return []
-        files = []
-        for root, dirs, filenames in os.walk(mp):
-            dirs.sort()
-            for fn in sorted(filenames):
-                if os.path.splitext(fn)[1].lower() in AUDIO_EXTS:
-                    files.append(os.path.join(root, fn))
-        log.info("Data disc: found %d audio files", len(files))
-        return files
 
     def parse_toc(self, raw_id: str) -> dict | None:
         if not raw_id:

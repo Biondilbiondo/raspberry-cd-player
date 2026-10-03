@@ -15,13 +15,12 @@ VAULT_AUDIO_EXTS = {".flac", ".wav", ".mp3", ".ogg", ".m4a"}
 
 import pygame
 
-from player import Player
-from ui import UI
-from metadata_manager import MetadataManager
-from stats_manager import StatsManager
-from cd_handler import CDHandler
-from input_handler import InputHandler, InputEvent
-from library_manager import LibraryManager
+from .player import Player
+from .ui import UI
+from .metadata_manager import MetadataManager
+from .cd_handler import CDHandler
+from .input_handler import InputHandler, InputEvent
+from .library_manager import LibraryManager
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -48,7 +47,6 @@ class MusicPlayer:
         self.player   = Player()
         self.ui       = UI()
         self.metadata = MetadataManager()
-        self.stats    = StatsManager()
         self.cd       = CDHandler()
         self.library  = LibraryManager()
         self.input    = InputHandler()
@@ -92,10 +90,8 @@ class MusicPlayer:
             elif not present and was_present:
                 if self.state != State.CD_LOADING:
                     log.info("CD removed")
-                    if self.state == State.PLAYBACK and self.source in ("cd", "data_cd", "vault"):
+                    if self.state == State.PLAYBACK and self.source in ("cd", "vault"):
                         self.player.stop()
-                        if self.source == "data_cd":
-                            self.cd.unmount()
                         self.state = State.MAIN_MENU
                     was_present = False
             was_present = present
@@ -115,23 +111,14 @@ class MusicPlayer:
         # Try data disc first (blkid check) — fallback is tried again below
         # in case blkid requires root and silently fails.
         if self.cd.is_data_disc():
-            data_files = self.cd.get_data_files()
-            if data_files:
-                self._load_data_cd(data_files)
-                return
             self.ui.show_message("Data disc – no audio files found", duration=3)
             self.state = State.MAIN_MENU
             return
 
         tracks = self.cd.get_tracks()
+        print(tracks)
 
         if not tracks:
-            # blkid may have failed (permission) — try mounting as data disc anyway
-            log.info("No audio tracks — attempting data-disc fallback")
-            data_files = self.cd.get_data_files()
-            if data_files:
-                self._load_data_cd(data_files)
-                return
             log.warning("No tracks found on CD")
             self.ui.show_message("Read error or empty CD", duration=3)
             self.state = State.MAIN_MENU
@@ -207,66 +194,6 @@ class MusicPlayer:
         self.current_track = 0
         self._start_playback()
 
-    def _load_data_cd(self, files: list):
-        """Load an MP3/data disc — read ID3 tags, fetch art, start playback."""
-        self.ui.show_loading("Reading MP3 disc…")
-        try:
-            from mutagen import File as MutagenFile
-            use_tags = True
-        except ImportError:
-            use_tags = False
-
-        tracklist = []
-        disc_artist = disc_album = disc_year = ""
-
-        for i, path in enumerate(files):
-            title = artist = album = year = ""
-            if use_tags:
-                try:
-                    audio = MutagenFile(path, easy=True)
-                    if audio:
-                        title  = (audio.get("title")  or [""])[0]
-                        artist = (audio.get("artist") or [""])[0]
-                        album  = (audio.get("album")  or [""])[0]
-                        year   = str((audio.get("date") or [""])[0])[:4]
-                        if not disc_artist and artist:
-                            disc_artist = artist
-                        if not disc_album and album:
-                            disc_album  = album
-                        if not disc_year and year:
-                            disc_year   = year
-                except Exception:
-                    pass
-            if not title:
-                # Fall back to filename, strip leading track number
-                name  = os.path.splitext(os.path.basename(path))[0]
-                m     = re.match(r"^\d+[\s.\-_]+(.+)$", name)
-                title = m.group(1).strip() if m else name
-            tracklist.append({"num": i + 1, "title": title, "path": path, "duration": ""})
-
-        # Infer album from mount-point / disc label if tags gave nothing
-        if not disc_album:
-            disc_album = os.path.basename(files[0].rsplit("/", 2)[0]) if files else "MP3 Disc"
-        if not disc_artist:
-            disc_artist = "Unknown Artist"
-
-        log.info("MP3 disc: %s – %s (%d tracks)", disc_artist, disc_album, len(tracklist))
-
-        # Fetch cover art via normal metadata pipeline
-        meta = self.metadata.fetch_album_metadata(disc_artist, disc_album, disc_year or None)
-
-        self.album_info = {
-            "artist":   disc_artist,
-            "album":    disc_album,
-            "year":     disc_year,
-            "art_path": meta.get("art_path"),
-            "tracks":   tracklist,
-        }
-        self.tracklist     = tracklist
-        self.source        = "data_cd"   # file-path playback from physical disc
-        self.current_track = 0
-        self._start_playback()
-
     def _load_library_album(self, album):
         self.ui.show_loading(f"Loading {album.get('title', '?')}…")
         local_tracks = album.get("tracks", [])
@@ -312,11 +239,6 @@ class MusicPlayer:
         self._dur_track      = -1   # force duration re-fetch for new track
         self.player.play(uri)
         self.paused = False
-        self.stats.log_play(
-            artist=self.album_info.get("artist", "Unknown"),
-            title=track.get("title", f"Track {idx + 1}"),
-            album=self.album_info.get("album", "Unknown"),
-        )
         log.info("Playing track %d: %s", idx + 1, track.get("title"))
 
     def _handle_input(self, event: InputEvent):
@@ -417,18 +339,13 @@ class MusicPlayer:
                     self.current_track = chap
                     if 0 <= chap < len(self.tracklist):
                         track = self.tracklist[chap]
-                        self.stats.log_play(
-                            artist=self.album_info.get("artist", "Unknown"),
-                            title=track.get("title", f"Track {chap + 1}"),
-                            album=self.album_info.get("album", "Unknown"),
-                        )
                         log.info("CD auto-advanced to track %d: %s",
                                  chap + 1, track.get("title"))
                     self._last_play_time = now
 
         # File finished when MPV goes idle
         if self.player.is_idle():
-            if self.source in ("library", "data_cd", "vault"):
+            if self.source in ("library", "vault"):
                 # Auto-advance to next track; end album when all done
                 next_idx = self.current_track + 1
                 if next_idx < len(self.tracklist):
@@ -436,8 +353,6 @@ class MusicPlayer:
                     self._play_track(next_idx)
                     return
                 log.info("Album finished")
-                if self.source == "data_cd":
-                    self.cd.unmount()
             else:
                 log.info("Album finished")
             self.player.stop()
@@ -530,9 +445,6 @@ class MusicPlayer:
                     position      = self._playback_pos,
                     duration      = self._playback_dur,
                 )
-            elif s == State.WRAPPED_SUMMARY:
-                summary = self.stats.get_wrapped()
-                self.ui.draw_wrapped(summary)
 
             pygame.display.flip()
             clock.tick(30)
@@ -542,11 +454,6 @@ class MusicPlayer:
         pygame.quit()
         log.info("Goodbye.")
 
-
 def main():
     app = MusicPlayer()
     app.run()
-
-
-if __name__ == "__main__":
-    main()

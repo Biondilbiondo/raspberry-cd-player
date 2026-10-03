@@ -98,6 +98,19 @@ class InputHandler:
         if et == pygame.JOYHATMOTION:
             return self._handle_hat(event.value)
 
+        if et == pygame.KEYDOWN:
+            if event.key == pygame.K_RIGHT:
+                return InputEvent.RIGHT
+            if event.key == pygame.K_LEFT:
+                return InputEvent.LEFT
+            if event.key == pygame.K_UP:
+                return InputEvent.UP
+            if event.key == pygame.K_DOWN:
+                return InputEvent.DOWN
+            if event.key == pygame.K_SPACE:
+                return InputEvent.FIRE
+            if event.key == pygame.K_BACKSPACE:
+                return InputEvent.BACK
         return None
 
     # ── Private helpers ───────────────────────────────────────────────────────

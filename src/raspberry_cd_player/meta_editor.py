@@ -1323,7 +1323,6 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
-if __name__ == "__main__":
+def meta_editor_main():
     print(f"Metadata editor → http://0.0.0.0:{PORT}")
     HTTPServer(("0.0.0.0", PORT), Handler).serve_forever()

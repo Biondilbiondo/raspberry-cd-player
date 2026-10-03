@@ -33,10 +33,15 @@ import sqlite3
 import time
 from datetime import datetime
 from typing import Dict, List, Optional
+import re 
+import subprocess
+import discid
+import musicbrainzngs
 
 import requests
 
 log = logging.getLogger("metadata")
+musicbrainzngs.set_useragent("raspberry-cd-player", "0.1", "none")
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 _DATA_DIR      = os.path.expanduser("~/.local/share/musicplayer")
@@ -200,13 +205,13 @@ def _mb_extract_artist(release: dict) -> str:
 
 def _mb_extract_tracks(release: dict) -> List[Dict]:
     tracks = []
-    for medium in release.get("media", []):
-        for t in medium.get("tracks", []):
+    for medium in release.get("medium-list", []):
+        for t in medium.get("track-list", []):
             rec    = t.get("recording", {})
             dur_ms = rec.get("length") or t.get("length") or 0
-            dur_s  = dur_ms // 1000
+            dur_s  = int(dur_ms) // 1000
             tracks.append({
-                "num":      t.get("position", len(tracks) + 1),
+                "num":      int(t.get("position", len(tracks) + 1)),
                 "title":    rec.get("title") or t.get("title", f"Track {len(tracks)+1}"),
                 "duration": f"{dur_s // 60}:{dur_s % 60:02d}" if dur_s else "",
             })
@@ -226,23 +231,30 @@ def _mb_pick_release(releases: list) -> dict:
 def _fetch_from_mb(mb_disc_id: str, num_tracks: int,
                    offsets: List[int], total_secs: int,
                    raw_tracks: List[Dict]) -> Optional[Dict]:
+    releases: List[Dict] = []
+    _INCLUDES = ["recordings", "artists", "artist-credits", "release-groups"]
+
     # 1. Exact disc-ID lookup
     log.info("MB exact lookup: %s", mb_disc_id)
-    data = _http_get_json(f"{MB_BASE}/discid/{mb_disc_id}", params={
-        "inc": "recordings+artists+release-groups", "fmt": "json"
-    })
-    if not data:
-        # 2. Fuzzy TOC lookup
+    try:
+        data = musicbrainzngs.get_releases_by_discid(mb_disc_id, includes=_INCLUDES)
+        releases = data.get("disc", {}).get("release-list", [])
+    except musicbrainzngs.ResponseError:
+        pass  # 404: disc ID not found, fall through to the TOC lookup
+    except musicbrainzngs.WebServiceError as exc:
+        log.warning("MB disc-ID lookup failed: %s", exc)
+
+    # 2. Fuzzy TOC lookup
+    if not releases:
         toc_str = f"1 {num_tracks} {total_secs * 75} " + " ".join(str(o) for o in offsets)
         log.info("MB TOC lookup: %s…", toc_str[:50])
-        data = _http_get_json(f"{MB_BASE}/discid/-", params={
-            "toc": toc_str,
-            "inc": "recordings+artists+release-groups", "fmt": "json"
-        })
-    if not data:
-        return None
+        try:
+            data = musicbrainzngs.get_releases_by_discid("-", toc=toc_str, includes=_INCLUDES)
+            releases = data.get("release-list", [])
+        except musicbrainzngs.WebServiceError as exc:
+            log.warning("MB TOC lookup failed: %s", exc)
+            return None
 
-    releases = data.get("releases", [data])
     if not releases:
         return None
 
@@ -250,17 +262,15 @@ def _fetch_from_mb(mb_disc_id: str, num_tracks: int,
     mbid = best.get("id", "")
 
     # Fetch full details if we only got a stub
-    if mbid and not best.get("media"):
-        details = _http_get_json(f"{MB_BASE}/release/{mbid}", params={
-            "inc": "recordings+artists+release-groups", "fmt": "json"
-        })
-        if details:
-            best = details
+    if mbid and not best.get("medium-list"):
+        try:
+            best = musicbrainzngs.get_release_by_id(mbid, includes=_INCLUDES)["release"]
+        except musicbrainzngs.WebServiceError as exc:
+            log.warning("MB release fetch failed: %s", exc)
 
     artist = _mb_extract_artist(best)
-    album  = best.get("title", "")
-    date   = best.get("date", "") or ""
-    year   = date[:4] if date else ""
+    album = best.get("title", "")
+    year = (best.get("date") or "")[:4]
     tracks = _mb_extract_tracks(best) or raw_tracks
 
     if not artist or not album:
@@ -269,6 +279,127 @@ def _fetch_from_mb(mb_disc_id: str, num_tracks: int,
     log.info("MB found: %s – %s (%s)", artist, album, year)
     return {"artist": artist, "album": album, "year": year,
             "tracks": tracks, "mbid": mbid}
+
+
+
+def _fetch_from_mb_by_metadata(artist: str, album: str,
+                               raw_tracks: List[Dict],
+                               min_score: float = 80.0) -> Optional[Dict]:
+    def _norm(s: str) -> str:
+        """Lowercase, strip punctuation/whitespace noise for comparison."""
+        return re.sub(r"[^\w]+", " ", (s or "").lower()).strip()
+
+
+    def _sim(a: str, b: str) -> float:
+        from difflib import SequenceMatcher
+
+        return SequenceMatcher(None, _norm(a), _norm(b)).ratio()
+
+
+    def _score_release(rel: Dict, artist: str, album: str, num_tracks: int) -> float:
+        score = 0.0
+        score += _sim(rel.get("title", ""), album) * 50
+        score += _sim(rel.get("artist-credit-phrase", ""), artist) * 30
+        score += float(rel.get("ext:score", 0)) / 100 * 10   # MB's own relevance score
+
+        if rel.get("status") == "Official":
+            score += 5
+        if rel.get("date"):
+            score += 2
+
+        # Prefer releases whose track count matches what we already have
+        try:
+            if int(rel.get("medium-track-count", -1)) == num_tracks:
+                score += 15
+        except (TypeError, ValueError):
+            pass
+        return score
+
+
+    def _flatten_tracks(release: Dict, num_tracks: int) -> List[Dict]:
+        """Extract tracks, preferring a single medium that matches num_tracks."""
+        media = release.get("medium-list", [])
+
+        def _medium_tracks(medium: Dict) -> List[Dict]:
+            out = []
+            for t in medium.get("track-list", []):
+                rec = t.get("recording", {})
+                out.append({
+                    "disc": int(medium.get("position", 1)),
+                    "number": t.get("number") or t.get("position"),
+                    "title": rec.get("title") or t.get("title", ""),
+                    "artist": t.get("artist-credit-phrase")
+                            or rec.get("artist-credit-phrase", ""),
+                    "length_ms": int(t["length"]) if t.get("length") else None,
+                    "recording_id": rec.get("id"),
+                })
+            return out
+
+        for medium in media:
+            if len(medium.get("track-list", [])) == num_tracks:
+                return _medium_tracks(medium)
+
+        # No single medium matches: return everything across all discs
+        return [t for m in media for t in _medium_tracks(m)]
+    
+    _INCLUDES = ["recordings", "artists", "artist-credits", "release-groups"]
+    num_tracks = len(raw_tracks)
+
+    # 1. Search by artist + album
+    log.info("MB search: %s – %s", artist, album)
+    try:
+        data = musicbrainzngs.search_releases(artist=artist, release=album, limit=15)
+    except musicbrainzngs.WebServiceError as exc:
+        log.warning("MB search failed: %s", exc)
+        return None
+
+    releases = data.get("release-list", [])
+    if not releases:
+        return None
+
+    # 2. Score candidates and pick the best one
+    scored = sorted(
+        ((_score_release(r, artist, album, num_tracks), r) for r in releases),
+        key=lambda x: x[0], reverse=True,
+    )
+    best_score, best = scored[0]
+    log.info("MB best candidate: %s – %s (score %.1f)",
+             best.get("artist-credit-phrase"), best.get("title"), best_score)
+
+    if best_score < min_score:
+        log.info("MB best score below threshold (%.1f), rejecting", min_score)
+        return None
+
+    mbid = best.get("id", "")
+
+    # 3. Fetch full release (search results don't include track lists)
+    try:
+        full = musicbrainzngs.get_release_by_id(mbid, includes=_INCLUDES)["release"]
+    except musicbrainzngs.WebServiceError as exc:
+        log.warning("MB release fetch failed: %s", exc)
+        return None
+
+    # 4. Build cleaned result
+    mb_tracks = _flatten_tracks(full, num_tracks)
+    tracks_matched = len(mb_tracks) == num_tracks
+
+    clean_artist = full.get("artist-credit-phrase", "")
+    clean_album = full.get("title", "")
+    year = (full.get("date") or "")[:4]
+
+    if not clean_artist or not clean_album:
+        return None
+
+    log.info("MB found: %s – %s (%s)", clean_artist, clean_album, year)
+    return {
+        "artist": clean_artist,
+        "album": clean_album,
+        "year": year,
+        "tracks": mb_tracks if tracks_matched else raw_tracks,
+        "tracks_matched": tracks_matched,
+        "mbid": mbid,
+        "score": round(best_score, 1),
+    }
 
 
 def _fetch_art_caa(mbid: str, cache_key: str) -> Optional[str]:
@@ -402,7 +533,10 @@ class MetadataManager:
             log.error("Cache write: %s", e)
 
     # ── Public API ────────────────────────────────────────────────────────────
-    def fetch_cd_metadata(self, disc_id_str: Optional[str], raw_tracks: List[Dict]) -> Dict:
+    def fetch_cd_metadata(self, 
+                          disc_id_str: Optional[str], 
+                          raw_tracks: List[Dict], 
+                          device: str = discid.get_default_device()) -> Dict:
         toc = self._parse_discid_str(disc_id_str)
         if not toc:
             return self._unknown(raw_tracks)
@@ -439,16 +573,41 @@ class MetadataManager:
         if cached:
             return cached
 
-        # 2. MusicBrainz — primary disc-ID lookup
-        mb = _fetch_from_mb(mb_disc_id, num_tracks, offsets, total_secs, raw_tracks)
+        # 2. From disc text
+        out = subprocess.run(
+            ["cd-info", "--no-device-info", "--no-cddb", device],
+            capture_output=True, text=True, check=True,
+        ).stdout
+
+        disc, tracks, current = {}, {}, None
+        for line in out.splitlines():
+            if re.match(r"\s*CD-TEXT for Disc", line):
+                current = disc
+            elif (m := re.match(r"\s*CD-TEXT for Track\s+(\d+)", line)):
+                current = tracks.setdefault(int(m.group(1)), {})
+            elif current is not None and (m := re.match(r"\s+([A-Z_]+):\s*(.*)", line)):
+                current[m.group(1).lower()] = m.group(2).strip()
+
+        mb = _fetch_from_mb_by_metadata(artist=disc.get("performer"),
+                                        album=disc.get("title"),
+                                        raw_tracks=[tracks[n].get("title", "") for n in sorted(tracks)])
+        if mb:
+            log.info("MB Found from CD-TEXT + MusicBrainz")
+
+        # 3. MusicBrainz — primary disc-ID lookup
+        if not mb:
+            mb = _fetch_from_mb(mb_disc_id, num_tracks, offsets, total_secs, raw_tracks)
+            if mb:
+                log.info("MB Found from DiscID + MusicBrainz")
 
         if mb:
+            log.info(f"Identified MB release: https://musicbrainz.org/release/{mb["mbid"]}")
             artist = mb["artist"]
             album  = mb["album"]
         else:
             artist = album = ""
 
-        # 3. iTunes — second opinion + art
+        # 4. iTunes — second opinion + art
         itunes = _fetch_from_itunes(artist, album, cddb_id) if artist else None
 
         # Consensus: if iTunes confirms the artist, mark as high-confidence
@@ -463,7 +622,7 @@ class MetadataManager:
             log.info("No metadata found for disc %s", cddb_id)
             return self._unknown(raw_tracks)
 
-        # 4. Art: iTunes → Deezer → MusicBrainz CAA
+        # 5. Art: iTunes → Deezer → MusicBrainz CAA
         art_path = (
             (itunes or {}).get("art_path")
             or _fetch_art_deezer(artist, album, cddb_id)
@@ -508,7 +667,7 @@ class MetadataManager:
     def _parse_discid_str(raw: Optional[str]) -> Optional[dict]:
         if not raw:
             return None
-        from cd_handler import CDHandler
+        from .cd_handler import CDHandler
         return CDHandler().parse_toc(raw)
 
     @staticmethod
