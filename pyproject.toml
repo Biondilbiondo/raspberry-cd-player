@@ -11,6 +11,7 @@ dependencies = [
     "discid>=1.4.2",
     "mpv>=1.0.8",
     "musicbrainzngs>=0.7.1",
+    "mutagen>=1.48.1",
     "pygame>=2.6.1",
     "requests>=2.34.2",
 ]

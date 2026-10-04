@@ -646,6 +646,7 @@ class MetadataManager:
             "album":    mb["album"],
             "year":     mb["year"],
             "tracks":   mb["tracks"],
+            "mbid":     mb["mbid"],
             "art_path": art_path,
         }
         self._cache_put(cddb_id, mb_disc_id, meta)

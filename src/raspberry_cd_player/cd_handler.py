@@ -12,8 +12,7 @@ import logging
 import os
 import subprocess
 import discid
-
-AUDIO_EXTS   = {".mp3", ".flac", ".ogg", ".m4a", ".wav", ".aac", ".wma"}
+import configparser
 
 log = logging.getLogger("cd_handler")
 
@@ -22,8 +21,9 @@ CDROM_DRIVE_STATUS = 0x5326
 CDS_DISC_OK        = 4
 
 # Target drive speed (1x = 150 KB/s; 4x is quiet enough for audio)
-CD_SPEED = 4
-
+config = configparser.ConfigParser()
+config.read('config.ini')
+CD_SPEED =  int(config.get('cd', 'cd_speed'))
 
 class CDHandler:
     def __init__(self, device: str = discid.get_default_device()):

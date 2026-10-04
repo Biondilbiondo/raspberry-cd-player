@@ -28,7 +28,7 @@ from .metadata_manager import MetadataManager
 from .cd_handler import CDHandler
 from .input_handler import InputHandler, InputEvent
 from .library_manager import LibraryManager
-from .cd_rip import _rip_chain, _rip_done_file, _rip_doing_file, _rip_wav_file
+from .cd_rip import _rip_chain, _rip_done_file, _rip_doing_file, _rip_wav_file, _rip_estimated_len_s
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -94,13 +94,30 @@ class MusicPlayer:
             return True
         return False
 
-    def _rip_async(self, dest_dir, track):
+    def _rip_async(self, track):
         if not self.is_ripping:
-            self._rip_process = multiprocessing.Process(target=_rip_chain, args=(dest_dir, track, len(self.tracklist)))
-            self._rip_dir = dest_dir
+            self._rip_process = multiprocessing.Process(target=_rip_chain, 
+                                                        args=(self._rip_dir, 
+                                                              track, 
+                                                              len(self.tracklist), 
+                                                              self.album_info['mbid'],
+                                                              self.album_info['art_path']))
             self._rip_process.start()
         else:
             log.error("Cannot start ripping, another ripping process is alive!")
+
+    def get_rip_status(self):
+        if self._rip_dir is None:
+            return None
+        status = []
+        for track in range(len(self.tracklist)):
+            if os.path.exists(os.path.join(self._rip_dir, f"track{track+1:02d}.doing")):
+                status += ['doing']
+            elif os.path.exists(os.path.join(self._rip_dir, f"track{track+1:02d}.done")):
+                status += ['done']
+            else:
+                status += ['wait']
+        return status
 
     def _kill_rip(self):
         if not self.is_ripping:
@@ -118,7 +135,7 @@ class MusicPlayer:
             path = os.path.join(self._rip_dir, name)
             if name.endswith(".doing") and os.path.isfile(path):
                 os.remove(path)
-                print(f"Deleted: {path}")
+                log.info(f"Deleted: {path}")
 
     def _monitor_cd(self):
         was_present = False
@@ -169,11 +186,11 @@ class MusicPlayer:
         # TODO Check if the disc is already in the DB.
         vault_key = _disc_info["mb_id"]
 
+        self._rip_dir = os.path.join(CACHE_DIR, vault_key)
         meta    = self.metadata.fetch_cd_metadata(_disc_info)
 
         self.album_info = meta
         self.tracklist  = meta.get("tracks", _disc_info['tracks'])
-
         self._override_mtime = 0
 
         # Normalise durations to MM:SS strings
@@ -192,7 +209,6 @@ class MusicPlayer:
         self.source        = "cd-rip"
         self.current_track = 0
         self._start_playback()
-
 
     def _load_library_album(self, album):
         self.ui.show_loading(f"Loading {album.get('title', '?')}…")
@@ -233,30 +249,24 @@ class MusicPlayer:
         self.current_track = idx
         track = self.tracklist[idx]
 
-        if not os.path.exists(_rip_done_file(CACHE_DIR, idx)):
+        if not os.path.exists(_rip_done_file(self._rip_dir, idx)):
             self.player.pause()
-
 
             if self.is_ripping and not os.path.exists(_rip_doing_file(self._rip_dir, idx)):
                 # If ripping is not started, start ripping it now!
                 self._kill_rip()
             if not self.is_ripping:
-                self._rip_async(CACHE_DIR, idx)
+                self._rip_async(idx)
 
-            path = _rip_wav_file(CACHE_DIR, idx)
+            path = _rip_wav_file(self._rip_dir, idx)
 
             # Wait for the file to be long enough to be played
-            HEADER = 44
-            BYTES_PER_SEC = 176400
             LEAD = 5
             TIMEOUT = 30
-
-            needed = HEADER + LEAD * BYTES_PER_SEC
             deadline = time.time() + TIMEOUT
-
             while time.time() < deadline:
                 try:
-                    if os.path.getsize(path) >= needed:
+                    if _rip_estimated_len_s(path) >= LEAD:
                         with open(path, 'rb') as f:
                             if f.read(4) == b'RIFF':   # header is really there
                                 break
@@ -270,7 +280,7 @@ class MusicPlayer:
             else:
                 log.info(f"Ready to play {path} while ripper runs")
 
-        uri = _rip_wav_file(CACHE_DIR, idx)
+        uri = _rip_wav_file(self._rip_dir, idx)
 
         self._last_play_time = time.monotonic()
         self._playback_pos   = 0.0
@@ -372,15 +382,23 @@ class MusicPlayer:
             elif s == State.CD_LOADING:
                 pass   # ui.show_loading() already painted
             elif s == State.PLAYBACK:
+                if self.player.is_idle():
+                    if self.current_track + 1 < len(self.tracklist):
+                        self._play_track(self.current_track + 1)
+                    else:
+                        self.state = State.MAIN_MENU
+
                 pos = self.player.get_position()
                 self._playback_pos = pos
-
+                current_rip_pos = _rip_estimated_len_s(_rip_wav_file(self._rip_dir, self.current_track))
                 self.ui.draw_playback(
                     album_info    = self.album_info,
                     tracklist     = self.tracklist,
                     current_track = self.current_track,
                     paused        = self.paused,
                     position      = self._playback_pos,
+                    ripped_pos    = current_rip_pos,
+                    ripped_status = self.get_rip_status(),
                     duration      = self._playback_dur,
                 )
 
@@ -389,6 +407,7 @@ class MusicPlayer:
 
         self.player.stop()
         self.player.quit()
+        self._kill_rip()
         pygame.quit()
         log.info("Goodbye.")
 

@@ -36,6 +36,7 @@ C_HIGHLIGHT = (40,  40,  55)
 C_PLAYING   = (255, 165,  0)
 C_WHITE     = (255, 255, 255)
 C_PROGRESS  = (80,  80,  90)
+C_RIPPED    = (150,  150,  150)
 
 FONT_TITLE_SIZE    = 40   # artist name
 FONT_SUBTITLE_SIZE = 32   # album name
@@ -223,6 +224,8 @@ class UI:
         current_track: int,
         paused:        bool,
         position:      float = 0,
+        ripped_pos:    float = 0,
+        ripped_status: List = None,
         duration:      float = 0,
     ):
         self.screen.fill(C_BG)
@@ -254,10 +257,15 @@ class UI:
         bar_w = WIDTH - 40
         bar_h = 8
         frac  = max(0.0, min(1.0, (position / duration) if duration > 0 else 0))
+        ripped_frac = max(0.0, min(1.0, (ripped_pos / duration) if duration > 0 else 0))
 
         # Track (background)
         pygame.draw.rect(self.screen, C_PROGRESS,
                          (bar_x, bar_y, bar_w, bar_h), border_radius=4)
+        # Filled portion
+        if ripped_frac > 0:
+            pygame.draw.rect(self.screen, C_RIPPED,
+                             (bar_x, bar_y, int(bar_w * ripped_frac), bar_h), border_radius=4)
         # Filled portion
         if frac > 0:
             pygame.draw.rect(self.screen, C_ACCENT,
@@ -297,6 +305,14 @@ class UI:
             self.screen.blit(num_s, (12, y + (row_h - num_s.get_height()) // 2))
             self._draw_text_left(title, self.font_small, 40, y + (row_h - 15) // 2,
                                  color, WIDTH - 55)
+
+            if ripped_status[i] == 'done':
+                indicator_col = C_ACCENT
+            elif ripped_status[i] == 'doing':
+                indicator_col = C_RIPPED
+            else:
+                indicator_col = C_PROGRESS
+            pygame.draw.circle(self.screen, indicator_col, (410, y + (row_h) // 2), 10 )
 
         self._draw_message_overlay()
 
