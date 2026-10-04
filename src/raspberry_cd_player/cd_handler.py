@@ -52,41 +52,38 @@ class CDHandler:
         except Exception as e:
             log.debug("eject -x failed (non-fatal): %s", e)
 
-    def get_disc_id(self) -> str | None:
+    def get_disc_info(self) -> str | None:
         try:
             disc = discid.read(self.device)
             offsets = [t.offset for t in disc.tracks]
-            total_seconds = disc.sectors // 75  # leadout offset / 75
-            out = f"{disc.freedb_id} {len(disc.tracks)} "
-            out += " ".join([str(a) for a in offsets])
-            out += f" {total_seconds}"
-            return out
+            total_seconds = disc.sectors // 75
+            cd_discid_str = f"{disc.freedb_id} {len(disc.tracks)} "
+            cd_discid_str += " ".join([str(a) for a in offsets])
+            cd_discid_str += f" {total_seconds}"
+
+            num_tracks = len(disc.tracks)
+            offsets.append(total_seconds * 75)
+
+            tracks = []
+            for i in range(num_tracks):
+                duration_secs = (offsets[i + 1] - offsets[i]) / 75
+                tracks.append({
+                    "num":      i + 1,
+                    "title":    f"Track {i + 1:02d}",
+                    "duration": duration_secs,
+                })
+            log.info("Found %d tracks on disc", len(tracks))
+
+            return {'cd-discid-str': cd_discid_str, 
+                    'freedb_id': disc.freedb_id,
+                    'mb_id': disc.id,
+                    'tracks': tracks,
+                    'offsets': offsets[:-1],
+                    'total_seconds': total_seconds}
+        
         except Exception as e:
             log.error("cd-discid failed: %s", e)
-            return None
-
-    def get_tracks(self) -> list[dict]:
-        self.set_speed()
-        raw_id = self.get_disc_id()
-        if not raw_id:
-            return []
-        parts = raw_id.split()
-        if len(parts) < 3:
-            return []
-        num_tracks = int(parts[1])
-        offsets    = [int(p) for p in parts[2 : 2 + num_tracks]]
-        total_secs = int(parts[-1])
-        offsets.append(total_secs * 75)
-        tracks = []
-        for i in range(num_tracks):
-            duration_secs = (offsets[i + 1] - offsets[i]) / 75
-            tracks.append({
-                "num":      i + 1,
-                "title":    f"Track {i + 1:02d}",
-                "duration": duration_secs,
-            })
-        log.info("Found %d tracks on disc", len(tracks))
-        return tracks
+            return None, []
 
     # ── Data disc (MP3 CD) support ────────────────────────────────────────────
     def is_data_disc(self) -> bool:
@@ -101,25 +98,6 @@ class CDHandler:
         except Exception as e:
             log.debug("blkid check: %s", e)
             return False
-
-    def parse_toc(self, raw_id: str) -> dict | None:
-        if not raw_id:
-            return None
-        parts = raw_id.split()
-        if len(parts) < 3:
-            return None
-        cddb_id    = parts[0]
-        num_tracks = int(parts[1])
-        offsets    = [int(p) for p in parts[2 : 2 + num_tracks]]
-        total_secs = int(parts[-1])
-        mb_id      = self.compute_mb_disc_id(num_tracks, offsets, total_secs)
-        return {
-            "cddb_id":    cddb_id,
-            "mb_disc_id": mb_id,
-            "num_tracks": num_tracks,
-            "offsets":    offsets,
-            "total_secs": total_secs,
-        }
 
     @staticmethod
     def compute_mb_disc_id(num_tracks: int, offsets: list[int], total_secs: int) -> str:

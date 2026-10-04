@@ -6,6 +6,7 @@ main.py - Core state machine for the HiFiBerry Music Player
 import re
 import sys
 import time
+import multiprocessing
 import threading
 import logging
 import os
@@ -14,8 +15,10 @@ import configparser
 config = configparser.ConfigParser()
 config.read('config.ini')
 
-CD_VAULT = config.get('storage', 'cd_vault')
+CD_VAULT = config.get('storage', 'vault_dir')
+CACHE_DIR = config.get('storage', 'cache_dir')
 VAULT_AUDIO_EXTS = {".flac", ".wav", ".mp3", ".ogg", ".m4a"}
+AUTOMATIC_RIPPING = True
 
 import pygame
 
@@ -25,6 +28,7 @@ from .metadata_manager import MetadataManager
 from .cd_handler import CDHandler
 from .input_handler import InputHandler, InputEvent
 from .library_manager import LibraryManager
+from .cd_rip import _rip_chain, _rip_done_file, _rip_doing_file, _rip_wav_file
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -61,7 +65,7 @@ class MusicPlayer:
         self.tracklist      = []
         self.current_track  = 0
         self.paused         = False
-        self.source         = None
+        self.source         = None # "CD-RIP", "library"
 
         self.main_menu_items = ["Play CD", "Library", "Music Wrapped", "Quit"]
         self.main_menu_sel   = 0
@@ -77,11 +81,44 @@ class MusicPlayer:
         # Progress bar state
         self._playback_pos   = 0.0
         self._playback_dur   = 0.0
-        self._chapter_times  = []   # CDDA: absolute start time of each chapter
-        self._dur_track      = -1   # track index for which duration was last cached
+
+        self._rip_process    = None
+        self._rip_dir        = None
 
         self._cd_monitor = threading.Thread(target=self._monitor_cd, daemon=True)
         self._cd_monitor.start()
+
+    @property
+    def is_ripping(self):
+        if self._rip_process is not None and self._rip_process.is_alive():
+            return True
+        return False
+
+    def _rip_async(self, dest_dir, track):
+        if not self.is_ripping:
+            self._rip_process = multiprocessing.Process(target=_rip_chain, args=(dest_dir, track, len(self.tracklist)))
+            self._rip_dir = dest_dir
+            self._rip_process.start()
+        else:
+            log.error("Cannot start ripping, another ripping process is alive!")
+
+    def _kill_rip(self):
+        if not self.is_ripping:
+            return
+        import signal
+        log.info("Trying to kill previous ripping process")
+        pid = self._rip_process.pid
+        os.killpg(pid, signal.SIGKILL)
+        while self.is_ripping:
+            log.info("Waiting killed ripping process")
+            time.sleep(1)
+        log.info("Process killed")
+        
+        for name in os.listdir(self._rip_dir):
+            path = os.path.join(self._rip_dir, name)
+            if name.endswith(".doing") and os.path.isfile(path):
+                os.remove(path)
+                print(f"Deleted: {path}")
 
     def _monitor_cd(self):
         was_present = False
@@ -94,7 +131,7 @@ class MusicPlayer:
             elif not present and was_present:
                 if self.state != State.CD_LOADING:
                     log.info("CD removed")
-                    if self.state == State.PLAYBACK and self.source in ("cd", "vault"):
+                    if self.state == State.PLAYBACK and self.source in ("cd-rip"):
                         self.player.stop()
                         self.state = State.MAIN_MENU
                     was_present = False
@@ -119,84 +156,43 @@ class MusicPlayer:
             self.state = State.MAIN_MENU
             return
 
-        tracks = self.cd.get_tracks()
-        print(tracks)
+        _disc_info = self.cd.get_disc_info()
 
-        if not tracks:
+        if not _disc_info['tracks']:
             log.warning("No tracks found on CD")
             self.ui.show_message("Read error or empty CD", duration=3)
             self.state = State.MAIN_MENU
             return
 
-        disc_id = self.cd.get_disc_id()
-        self._disc_id_str = disc_id
+        self._disc_id_str = _disc_info['cd-discid-str']
 
-        # Write cddb_id + vault_key to temp files for meta_editor
-        toc       = self.cd.parse_toc(disc_id) if disc_id else None
-        vault_key = toc["mb_disc_id"] if toc else ((disc_id or "").split()[0])
-        try:
-            cddb_id = (disc_id or "").split()[0] if disc_id else ""
-            with open("/tmp/musicplayer_current_disc", "w") as _f:
-                _f.write(cddb_id)
-            with open("/tmp/musicplayer_vault_key", "w") as _f:
-                _f.write(vault_key)
-        except Exception:
-            pass
+        # TODO Check if the disc is already in the DB.
+        vault_key = _disc_info["mb_id"]
 
-        # ── Vault check: play ripped copy if available ─────────────────────
-        if vault_key:
-            vault_dir = os.path.join(CD_VAULT, vault_key)
-            if os.path.isdir(vault_dir):
-                vault_files = sorted(
-                    os.path.join(vault_dir, fn)
-                    for fn in os.listdir(vault_dir)
-                    if os.path.splitext(fn)[1].lower() in VAULT_AUDIO_EXTS
-                )
-                if vault_files:
-                    log.info("Vault hit for %s — playing ripped copy", vault_key)
-                    self.ui.show_loading("Loading from vault…")
-                    meta = self.metadata.fetch_cd_metadata(disc_id, tracks)
-                    meta_tracks = meta.get("tracks", [])
-                    tracklist = []
-                    for i, path in enumerate(vault_files):
-                        mt = meta_tracks[i] if i < len(meta_tracks) else {}
-                        d  = mt.get("duration", 0)
-                        if isinstance(d, (int, float)):
-                            d = f"{int(d // 60):02d}:{int(d % 60):02d}"
-                        tracklist.append({
-                            "num":      i + 1,
-                            "title":    mt.get("title", f"Track {i+1:02d}"),
-                            "duration": d,
-                            "path":     path,
-                        })
-                    self.album_info    = {**meta, "tracks": tracklist}
-                    self.tracklist     = tracklist
-                    self.source        = "vault"
-                    self.current_track = 0
-                    self._start_playback()
-                    return
-
-        meta    = self.metadata.fetch_cd_metadata(disc_id, tracks)
-        try:
-            self._override_mtime = os.path.getmtime(
-                "/opt/musicplayer/disc_overrides.json")
-        except OSError:
-            self._override_mtime = 0
+        meta    = self.metadata.fetch_cd_metadata(_disc_info)
 
         self.album_info = meta
-        self.tracklist  = meta.get("tracks", tracks)
+        self.tracklist  = meta.get("tracks", _disc_info['tracks'])
+
+        self._override_mtime = 0
 
         # Normalise durations to MM:SS strings
-        for t in self.tracklist:
+        for i, t in enumerate(self.tracklist):
+            # Extract duration from disc directly to avoid issues
+            dd = float(_disc_info['tracks'][i]['duration'])
+            t['disc_duration_s'] = dd
+            t['disc_duration'] = f"{int(dd // 60):02d}:{int(dd % 60):02d}"
+
             d = t.get("duration", 0)
             if isinstance(d, (int, float)):
                 t["duration"] = f"{int(d // 60):02d}:{int(d % 60):02d}"
             else:
                 t["duration"] = str(d)
 
-        self.source        = "cd"
+        self.source        = "cd-rip"
         self.current_track = 0
         self._start_playback()
+
 
     def _load_library_album(self, album):
         self.ui.show_loading(f"Loading {album.get('title', '?')}…")
@@ -221,7 +217,6 @@ class MusicPlayer:
         self._playback_pos  = 0.0
         self._playback_dur  = 0.0
         self._chapter_times = []
-        self._dur_track     = -1
 
     def _start_playback(self):
         self._reset_progress()
@@ -230,17 +225,56 @@ class MusicPlayer:
         self._play_track(self.current_track)
 
     def _play_track(self, idx: int):
+        log.info(f"Start playing track {idx+1} while ripping")
+
         if not self.tracklist:
             return
         idx = max(0, min(idx, len(self.tracklist) - 1))
         self.current_track = idx
         track = self.tracklist[idx]
 
-        uri = f"cdda://{idx + 1}" if self.source == "cd" else track.get("path", "")
+        if not os.path.exists(_rip_done_file(CACHE_DIR, idx)):
+            self.player.pause()
+
+
+            if self.is_ripping and not os.path.exists(_rip_doing_file(self._rip_dir, idx)):
+                # If ripping is not started, start ripping it now!
+                self._kill_rip()
+            if not self.is_ripping:
+                self._rip_async(CACHE_DIR, idx)
+
+            path = _rip_wav_file(CACHE_DIR, idx)
+
+            # Wait for the file to be long enough to be played
+            HEADER = 44
+            BYTES_PER_SEC = 176400
+            LEAD = 5
+            TIMEOUT = 30
+
+            needed = HEADER + LEAD * BYTES_PER_SEC
+            deadline = time.time() + TIMEOUT
+
+            while time.time() < deadline:
+                try:
+                    if os.path.getsize(path) >= needed:
+                        with open(path, 'rb') as f:
+                            if f.read(4) == b'RIFF':   # header is really there
+                                break
+                except FileNotFoundError:
+                    pass
+                time.sleep(0.1)
+
+            if time.time() >= deadline:
+                log.error(f"Waited the start of the rip for {TIMEOUT} s, but didn't started.")
+                raise FileNotFoundError(f"File {path} not ready for the player.")
+            else:
+                log.info(f"Ready to play {path} while ripper runs")
+
+        uri = _rip_wav_file(CACHE_DIR, idx)
 
         self._last_play_time = time.monotonic()
         self._playback_pos   = 0.0
-        self._dur_track      = -1   # force duration re-fetch for new track
+        self._playback_dur   = self.tracklist[idx]['disc_duration_s']
         self.player.play(uri)
         self.paused = False
         log.info("Playing track %d: %s", idx + 1, track.get("title"))
@@ -287,16 +321,6 @@ class MusicPlayer:
             elif event == InputEvent.DOWN:
                 self._play_track(self.current_track + 1)
 
-            elif event == InputEvent.LEFT:
-                self.player.volume_down()
-                vol = self.player.get_volume()
-                self.ui.show_message(f"Volume  {vol}%", duration=1.5)
-
-            elif event == InputEvent.RIGHT:
-                self.player.volume_up()
-                vol = self.player.get_volume()
-                self.ui.show_message(f"Volume  {vol}%", duration=1.5)
-
             elif event == InputEvent.BACK:
                 self.player.stop()
                 self.state = self.prev_state or State.MAIN_MENU
@@ -323,65 +347,6 @@ class MusicPlayer:
         elif item == "Quit":
             self._running = False
 
-    def _check_track_end(self):
-        if self.state != State.PLAYBACK:
-            return
-        if self.paused:
-            return
-        if time.monotonic() - self._last_play_time < 3.0:
-            return
-
-        # For CD: poll MPV chapter to detect auto-advance between tracks.
-        # Only poll every 2 seconds to avoid flooding the IPC socket.
-        if self.source == "cd":
-            now = time.monotonic()
-            if now - self._last_chapter_check >= 2.0:
-                self._last_chapter_check = now
-                chap = self.player.get_current_chapter()
-                if chap >= 0 and chap != self.current_track:
-                    # MPV has moved to the next chapter (next track)
-                    self.current_track = chap
-                    if 0 <= chap < len(self.tracklist):
-                        track = self.tracklist[chap]
-                        log.info("CD auto-advanced to track %d: %s",
-                                 chap + 1, track.get("title"))
-                    self._last_play_time = now
-
-        # File finished when MPV goes idle
-        if self.player.is_idle():
-            if self.source in ("library", "vault"):
-                # Auto-advance to next track; end album when all done
-                next_idx = self.current_track + 1
-                if next_idx < len(self.tracklist):
-                    log.info("Auto-advancing to track %d", next_idx + 1)
-                    self._play_track(next_idx)
-                    return
-                log.info("Album finished")
-            else:
-                log.info("Album finished")
-            self.player.stop()
-            self.state = self.prev_state or State.MAIN_MENU
-
-    def _check_override_change(self):
-        """Hot-reload metadata if disc_overrides.json was saved while playing."""
-        if self.state != State.PLAYBACK or self.source != "cd":
-            return
-        if not self._disc_id_str:
-            return
-        try:
-            mtime = os.path.getmtime("/opt/musicplayer/disc_overrides.json")
-        except OSError:
-            return
-        if mtime <= self._override_mtime:
-            return
-        # File changed — reload
-        self._override_mtime = mtime
-        log.info("disc_overrides.json changed — reloading metadata")
-        raw_tracks = self.tracklist  # keep current tracklist as fallback
-        meta = self.metadata.fetch_cd_metadata(self._disc_id_str, raw_tracks)
-        self.album_info = meta
-        self.tracklist  = meta.get("tracks") or raw_tracks
-        self.ui._art_cache.clear()   # flush cached artwork surface
 
     def run(self):
         clock = pygame.time.Clock()
@@ -399,9 +364,6 @@ class MusicPlayer:
                     if inp:
                         self._handle_input(inp)
 
-            self._check_track_end()
-            self._check_override_change()
-
             s = self.state
             if s == State.MAIN_MENU:
                 self.ui.draw_main_menu(self.main_menu_items, self.main_menu_sel)
@@ -410,37 +372,9 @@ class MusicPlayer:
             elif s == State.CD_LOADING:
                 pass   # ui.show_loading() already painted
             elif s == State.PLAYBACK:
-                abs_pos = self.player.get_position()
-                if self.source == "cd":
-                    # CDDA: time-pos is absolute from disc start.
-                    # Use chapter start times to get per-track position/duration.
-                    if not self._chapter_times:
-                        chapters = self.player.get_chapter_list()
-                        self._chapter_times = [
-                            float(ch.get("time", 0)) for ch in chapters
-                        ]
-                    if self._chapter_times:
-                        ch = self.current_track
-                        t0 = self._chapter_times[ch] if ch < len(self._chapter_times) else 0
-                        t1 = (self._chapter_times[ch + 1]
-                              if ch + 1 < len(self._chapter_times) else 0)
-                        if t1 <= t0:
-                            # Last track — fetch total disc duration once
-                            if self._dur_track != ch:
-                                total = self.player.get_duration()
-                                self._playback_dur = max(0.0, total - t0)
-                                self._dur_track = ch
-                        else:
-                            self._playback_dur = t1 - t0
-                        self._playback_pos = max(0.0, abs_pos - t0)
-                    else:
-                        self._playback_pos = abs_pos
-                else:
-                    # Library / vault: time-pos resets to 0 per file
-                    self._playback_pos = abs_pos
-                    if self._dur_track != self.current_track:
-                        self._playback_dur = self.player.get_duration()
-                        self._dur_track    = self.current_track
+                pos = self.player.get_position()
+                self._playback_pos = pos
+
                 self.ui.draw_playback(
                     album_info    = self.album_info,
                     tracklist     = self.tracklist,

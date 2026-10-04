@@ -31,7 +31,7 @@ OVERRIDES_FILE = config.get('storage', 'overrides_file')
 CURRENT_DISC   = "/tmp/musicplayer_current_disc"
 VAULT_KEY_FILE = "/tmp/musicplayer_vault_key"
 CD_VAULT       = config.get('storage', 'vault_dir')
-MUSIC_DIR      = config.get('storage', 'music_dir')
+MUSIC_DIR      = "DIOCANE" #config.get('storage', 'music_dir')
 LIBRARY_ROOT = config.get('storage', 'library_dir')
 LIBRARY_JSON = os.path.join(LIBRARY_ROOT, "library.json")
 
@@ -260,24 +260,19 @@ def vault_files(key: str) -> list:
     )
 
 
-def _do_rip(vault_dir: str, num_tracks: int):
+def _do_rip(vault_dir: str, num_tracks: int, cdparanoia_timeout: int = 6000):
     """Background thread: rip using MPV (lenient with damaged discs).
     MPV already plays problem CDs successfully — so we capture its output
     per-chapter to WAV, then convert to MP3 with ffmpeg."""
-    global _rip_status
-
-    def _set(**kw):
-        with _rip_lock:
-            _rip_status.update(kw)
+    import logging
+    log = logging.getLogger('CD RIP')
 
     os.makedirs(vault_dir, exist_ok=True)
     have_ffmpeg = bool(shutil.which("ffmpeg"))
 
     try:
         for track in range(num_tracks):
-            with _rip_lock:
-                if not _rip_status["running"]:
-                    break
+            log.info(f"Ripping track {track}")
 
             wav_path = os.path.join(vault_dir, f"track{track+1:02d}.wav")
             mp3_path = os.path.join(vault_dir, f"track{track+1:02d}.mp3")
@@ -289,34 +284,18 @@ def _do_rip(vault_dir: str, num_tracks: int):
 
             if shutil.which("cdparanoia"):
                 try:
+                    log.info("Calling cdparanoia")
                     r = subprocess.run(
-                        ["cdparanoia", "-Z", "-d", "/dev/sr0",
+                        ["cdparanoia", "-Z", "-S", "4", "-d", "/dev/sr0",
                          str(track + 1), wav_path],
-                        timeout=90,
+                        timeout=cdparanoia_timeout,
                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                     )
                     ripped_ok = os.path.exists(wav_path) and os.path.getsize(wav_path) > 4096
                     if not ripped_ok:
-                        err_msg = f"cdparanoia exit={r.returncode}"
+                        log.error(f"cdparanoia exit={r.returncode}")
                 except subprocess.TimeoutExpired:
-                    err_msg = "cdparanoia timed out"
-
-            if not ripped_ok:
-                # MPV fallback — also with a short timeout
-                try:
-                    r = subprocess.run(
-                        ["mpv", "cdda:///dev/sr0",
-                         "--no-video", "--no-terminal", "--no-cache",
-                         "--ao=pcm", f"--ao-pcm-file={wav_path}",
-                         f"--chapter={track}-{track}"],
-                        timeout=90,
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                    )
-                    ripped_ok = os.path.exists(wav_path) and os.path.getsize(wav_path) > 4096
-                    if not ripped_ok:
-                        err_msg = f"mpv exit={r.returncode}"
-                except subprocess.TimeoutExpired:
-                    err_msg = "mpv timed out (disc may be copy-protected)"
+                    log.error("cdparanoia timed out")
 
             if not ripped_ok:
                 raise RuntimeError(
@@ -337,12 +316,8 @@ def _do_rip(vault_dir: str, num_tracks: int):
                 except OSError:
                     pass
 
-            _set(ripped=track + 1)
-
-        _set(done=True, running=False)
-
     except Exception as exc:
-        _set(error=str(exc), done=True, running=False)
+        log.error(str(exc))
 
 
 # ── HTML ──────────────────────────────────────────────────────────────────────

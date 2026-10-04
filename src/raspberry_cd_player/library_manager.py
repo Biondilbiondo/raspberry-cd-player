@@ -39,7 +39,7 @@ log = logging.getLogger("library")
 config = configparser.ConfigParser()
 config.read('config.ini')
 
-LIBRARY_ROOT = config.get('storage', 'library_root')
+LIBRARY_ROOT = config.get('storage', 'library_dir')
 LIBRARY_JSON = os.path.join(LIBRARY_ROOT, "library.json")
 
 AUDIO_EXTENSIONS = {".flac", ".wav", ".aiff", ".aif", ".alac", ".mp3", ".ogg", ".m4a"}

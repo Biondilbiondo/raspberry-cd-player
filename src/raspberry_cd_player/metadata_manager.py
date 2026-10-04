@@ -46,9 +46,9 @@ log = logging.getLogger("metadata")
 config = configparser.ConfigParser()
 config.read('config.ini')
 
-CD_VAULT = config.get('storage', 'cd_vault')
+CD_VAULT = config.get('storage', 'vault_dir')
 # ── Paths ─────────────────────────────────────────────────────────────────────
-_DATA_DIR      = config.get('storage', 'database_directory')
+_DATA_DIR      = config.get('storage', 'database_dir')
 CACHE_DIR      = config.get('storage', 'art_cache')
 CACHE_DB       = os.path.join(_DATA_DIR, "disc_cache.db")
 OVERRIDES_FILE = config.get('storage', 'overrides_file')
@@ -543,18 +543,21 @@ class MetadataManager:
 
     # ── Public API ────────────────────────────────────────────────────────────
     def fetch_cd_metadata(self, 
-                          disc_id_str: Optional[str], 
-                          raw_tracks: List[Dict], 
+                          disc_info: List[Dict] = None, 
                           device: str = discid.get_default_device()) -> Dict:
-        toc = self._parse_discid_str(disc_id_str)
-        if not toc:
-            return self._unknown(raw_tracks)
 
-        cddb_id    = toc["cddb_id"]
-        mb_disc_id = toc["mb_disc_id"]
-        offsets    = toc["offsets"]
-        total_secs = toc["total_secs"]
-        num_tracks = toc["num_tracks"]
+        if disc_info is None:
+            disc_info = CDHandler(device=device).get_disc_info()
+            
+            if disc_info is None:
+                return self._unknown(raw_tracks)
+
+        cddb_id    = disc_info["freedb_id"]
+        mb_disc_id = disc_info["mb_id"]
+        offsets    = disc_info["offsets"]
+        total_secs = disc_info["total_seconds"]
+        raw_tracks = disc_info["tracks"]
+        num_tracks = len(raw_tracks)
 
         # 0. Manual override
         override = self._load_override(cddb_id)
