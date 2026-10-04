@@ -10,6 +10,8 @@ import configparser
 config = configparser.ConfigParser()
 config.read('config.ini')
 CD_SPEED =  int(config.get('cd', 'cd_speed'))
+FFMPEG_OPTIONS = config.get('ffmpeg', 'options')
+FFMPEG_OUT_FORMAT = config.get('ffmpeg', 'format')
 
 log = logging.getLogger("cd rip")
 
@@ -26,7 +28,7 @@ def _rip_wav_file(dest_dir: str, track: int):
     return os.path.join(dest_dir, f"track{track+1:02d}.wav")
 
 def _rip_encoded_file(dest_dir: str, track: int):
-    return os.path.join(dest_dir, f"track{track+1:02d}.mp3")
+    return os.path.join(dest_dir, f"track{track+1:02d}.{FFMPEG_OUT_FORMAT}")
 
 def _rip_estimated_len_s(file: str):
     """Return the estimated length in seconds of a wav file that
@@ -114,7 +116,7 @@ def _encode_ripped_track(dest_dir, track):
     log.info(f"Encoding track {track+1}")
     mp3_path = _rip_encoded_file(dest_dir, track)
     subprocess.run(
-        ["ffmpeg", "-y", "-i", wav_path, "-q:a", "2", mp3_path],
+        ["ffmpeg", "-y", "-i", wav_path] + FFMPEG_OPTIONS.split() + [mp3_path],
         timeout=120,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )

@@ -152,6 +152,7 @@ class MusicPlayer:
                         self.player.stop()
                         self.state = State.MAIN_MENU
                     was_present = False
+                # TODO Clean cache
             was_present = present
             time.sleep(2)
 
