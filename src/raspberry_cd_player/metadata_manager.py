@@ -51,7 +51,6 @@ CD_VAULT = config.get('storage', 'vault_dir')
 _DATA_DIR      = config.get('storage', 'database_dir')
 CACHE_DIR      = config.get('storage', 'art_cache')
 CACHE_DB       = os.path.join(_DATA_DIR, "disc_cache.db")
-OVERRIDES_FILE = config.get('storage', 'overrides_file')
 os.makedirs(CACHE_DIR, exist_ok=True)
 os.makedirs(_DATA_DIR, exist_ok=True)
 
@@ -543,14 +542,13 @@ class MetadataManager:
 
     # ── Public API ────────────────────────────────────────────────────────────
     def fetch_cd_metadata(self, 
-                          disc_info: List[Dict] = None, 
+                          disc_info: dict = None, 
                           device: str = discid.get_default_device()) -> Dict:
 
         if disc_info is None:
             disc_info = CDHandler(device=device).get_disc_info()
-            
             if disc_info is None:
-                return self._unknown(raw_tracks)
+                return self._unknown([])
 
         cddb_id    = disc_info["freedb_id"]
         mb_disc_id = disc_info["mb_id"]
@@ -558,27 +556,6 @@ class MetadataManager:
         total_secs = disc_info["total_seconds"]
         raw_tracks = disc_info["tracks"]
         num_tracks = len(raw_tracks)
-
-        # 0. Manual override
-        override = self._load_override(cddb_id)
-        if override:
-            log.info("Override: %s – %s", override.get("artist"), override.get("album"))
-            tracks   = override.get("tracks") or raw_tracks
-            # Use art the user uploaded/saved; only fetch automatically if none stored
-            art_path = override.get("art_path", "")
-            if not art_path or not os.path.exists(art_path):
-                itunes   = _fetch_from_itunes(override.get("artist", ""),
-                                              override.get("album", ""), cddb_id)
-                art_path = (itunes or {}).get("art_path") or \
-                           _fetch_art_deezer(override.get("artist", ""),
-                                             override.get("album", ""), cddb_id)
-            return {
-                "artist":   override.get("artist", "Unknown Artist"),
-                "album":    override.get("album",  "Unknown CD"),
-                "year":     str(override.get("year", "")),
-                "tracks":   tracks,
-                "art_path": art_path,
-            }
 
         # 1. Cache
         cached = self._cache_get(cddb_id, mb_disc_id)
@@ -613,7 +590,7 @@ class MetadataManager:
                 log.info("MB Found from DiscID + MusicBrainz")
 
         if mb:
-            log.info(f"Identified MB release: https://musicbrainz.org/release/{mb["mbid"]}")
+            log.info(f"Identified MB release: https://musicbrainz.org/release/{mb['mbid']}")
             artist = mb["artist"]
             album  = mb["album"]
         else:
@@ -665,17 +642,6 @@ class MetadataManager:
                 "tracks": [], "art_path": art_path}
 
     # ── Helpers ───────────────────────────────────────────────────────────────
-    @staticmethod
-    def _load_override(cddb_id: str) -> Optional[Dict]:
-        try:
-            if not os.path.exists(OVERRIDES_FILE):
-                return None
-            with open(OVERRIDES_FILE, encoding="utf-8") as f:
-                return json.load(f).get(cddb_id)
-        except Exception as e:
-            log.warning("disc_overrides.json: %s", e)
-            return None
-
     @staticmethod
     def _parse_discid_str(raw: Optional[str]) -> Optional[dict]:
         if not raw:

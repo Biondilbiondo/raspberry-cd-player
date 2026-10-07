@@ -74,9 +74,7 @@ class MusicPlayer:
 
         self._running        = True
         self._last_play_time = 0
-        self._last_chapter_check = 0
         self._disc_id_str    = None   # stored so hot-reload can re-fetch
-        self._override_mtime = 0      # mtime of disc_overrides.json at last load
 
         # Progress bar state
         self._playback_pos   = 0.0
@@ -192,7 +190,6 @@ class MusicPlayer:
 
         self.album_info = meta
         self.tracklist  = meta.get("tracks", _disc_info['tracks'])
-        self._override_mtime = 0
 
         # Normalise durations to MM:SS strings
         for i, t in enumerate(self.tracklist):

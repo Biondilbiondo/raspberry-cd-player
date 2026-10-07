@@ -4,7 +4,6 @@ import subprocess
 import configparser
 import logging
 from .add_metadata import tag_file
-import configparser
 
 # Target drive speed (1x = 150 KB/s; 4x is quiet enough for audio)
 config = configparser.ConfigParser()
@@ -14,9 +13,6 @@ FFMPEG_OPTIONS = config.get('ffmpeg', 'options')
 FFMPEG_OUT_FORMAT = config.get('ffmpeg', 'format')
 
 log = logging.getLogger("cd rip")
-
-config = configparser.ConfigParser()
-config.read('config.ini')
 
 def _rip_done_file(dest_dir: str, track: int):
     return os.path.join(dest_dir, f"track{track+1:02d}.done")
@@ -57,8 +53,6 @@ def _rip_chain(dest_dir: str,
 
     for i in track_schedule:
         _rip_track(dest_dir, i, cdparanoia_timeout)
-        _encode_ripped_track(dest_dir, i)
-        tag_file(_rip_encoded_file(dest_dir, i), i+1, mbid, cover_path=art_path)
 
     for i in range(ntracks):
         _encode_ripped_track(dest_dir, i)

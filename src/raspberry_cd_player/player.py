@@ -101,13 +101,6 @@ class Player:
     def is_idle(self) -> bool:
         return bool(self._get("idle_active", True))
 
-    # ── Volume ────────────────────────────────────────────────────────────────
-    def get_volume(self) -> int:
-        vol = self._get("volume")
-        if vol is not None:
-            self._volume = int(vol)
-        return self._volume
-
     # ── Cleanup ───────────────────────────────────────────────────────────────
     def quit(self):
         try:
