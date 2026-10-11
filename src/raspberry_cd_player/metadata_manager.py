@@ -72,21 +72,6 @@ HEADERS = {
 }
 DISCOGS_TOKEN = os.environ.get("DISCOGS_TOKEN", "")
 
-# ── SQLite cache schema ───────────────────────────────────────────────────────
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS disc_cache (
-    cddb_id     TEXT PRIMARY KEY,
-    mb_disc_id  TEXT,
-    artist      TEXT NOT NULL DEFAULT '',
-    album       TEXT NOT NULL DEFAULT '',
-    year        TEXT NOT NULL DEFAULT '',
-    art_path    TEXT,
-    tracks_json TEXT NOT NULL DEFAULT '[]',
-    fetched_at  TEXT NOT NULL
-);
-"""
-
-
 # ── HTTP helpers ──────────────────────────────────────────────────────────────
 def _http_get_json(url: str, params: dict = None,
                    extra_headers: dict = None, retry: int = 2) -> Optional[dict]:
@@ -289,7 +274,6 @@ def _fetch_from_mb(mb_disc_id: str, num_tracks: int,
             "tracks": tracks, "mbid": mbid}
 
 
-
 def _fetch_from_mb_by_metadata(artist: str, album: str,
                                raw_tracks: List[Dict],
                                min_score: float = 80.0) -> Optional[Dict]:
@@ -424,8 +408,6 @@ def _fetch_art_caa(mbid: str, cache_key: str) -> Optional[str]:
         log.debug("CAA art: %s", e)
     return None
 
-
-# ── Name comparison helper ─────────────────────────────────────────────────────
 def _names_overlap(a: str, b: str, threshold: float = 0.5) -> bool:
     """True if the two names share enough words to be considered the same."""
     a, b = a.lower().strip(), b.lower().strip()
@@ -437,8 +419,6 @@ def _names_overlap(a: str, b: str, threshold: float = 0.5) -> bool:
     shorter = wa if len(wa) <= len(wb) else wb
     return len(shorter & (wa | wb)) / len(shorter) >= threshold
 
-
-# ── Discogs (library albums, optional) ───────────────────────────────────────
 def _fetch_from_discogs(artist: str, album: str) -> Optional[Dict]:
     if not DISCOGS_TOKEN:
         return None
@@ -480,176 +460,101 @@ def _fetch_from_discogs(artist: str, album: str) -> Optional[Dict]:
             "year": str(det.get("year", "")), "tracks": tracks, "art_path": art_path}
 
 
-# ── MetadataManager ───────────────────────────────────────────────────────────
-class MetadataManager:
-    def __init__(self):
-        self._conn = self._init_db()
 
-    # ── SQLite cache ──────────────────────────────────────────────────────────
-    def _init_db(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(CACHE_DB, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        conn.executescript(_SCHEMA)
-        conn.commit()
-        return conn
+def fetch_cd_metadata(disc_info: dict = None, 
+                      device: str = discid.get_default_device()) -> Dict:
 
-    def _cache_get(self, cddb_id: str, mb_disc_id: str = "") -> Optional[Dict]:
-        if mb_disc_id:
-            row = self._conn.execute(
-                "SELECT * FROM disc_cache WHERE mb_disc_id = ?", (mb_disc_id,)
-            ).fetchone()
-            if row:
-                log.info("Cache HIT (mb_disc_id): %s – %s", row["artist"], row["album"])
-                return self._row_to_meta(row)
-
-        row = self._conn.execute(
-            "SELECT * FROM disc_cache WHERE cddb_id = ?", (cddb_id,)
-        ).fetchone()
-        if row:
-            stored_mb = row["mb_disc_id"] or ""
-            if mb_disc_id and stored_mb and stored_mb != mb_disc_id:
-                log.info("CDDB collision for %s — ignoring cache", cddb_id)
-                return None
-            log.info("Cache HIT (cddb_id): %s – %s", row["artist"], row["album"])
-            return self._row_to_meta(row)
-        return None
-
-    def _row_to_meta(self, row) -> Dict:
-        return {
-            "artist":   row["artist"],
-            "album":    row["album"],
-            "year":     row["year"],
-            "art_path": row["art_path"],
-            "tracks":   json.loads(row["tracks_json"]),
-        }
-
-    def _cache_put(self, cddb_id: str, mb_disc_id: str, meta: Dict):
-        try:
-            self._conn.execute(
-                """INSERT OR REPLACE INTO disc_cache
-                   (cddb_id, mb_disc_id, artist, album, year, art_path, tracks_json, fetched_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (cddb_id, mb_disc_id,
-                 meta.get("artist", ""), meta.get("album", ""),
-                 meta.get("year", ""), meta.get("art_path"),
-                 json.dumps(meta.get("tracks", []), ensure_ascii=False),
-                 datetime.utcnow().isoformat()),
-            )
-            self._conn.commit()
-            log.info("Cached: %s – %s", meta["artist"], meta["album"])
-        except Exception as e:
-            log.error("Cache write: %s", e)
-
-    # ── Public API ────────────────────────────────────────────────────────────
-    def fetch_cd_metadata(self, 
-                          disc_info: dict = None, 
-                          device: str = discid.get_default_device()) -> Dict:
-
+    if disc_info is None:
+        disc_info = CDHandler(device=device).get_disc_info()
         if disc_info is None:
-            disc_info = CDHandler(device=device).get_disc_info()
-            if disc_info is None:
-                return self._unknown([])
+            return self._unknown([])
 
-        cddb_id    = disc_info["freedb_id"]
-        mb_disc_id = disc_info["mb_id"]
-        offsets    = disc_info["offsets"]
-        total_secs = disc_info["total_seconds"]
-        raw_tracks = disc_info["tracks"]
-        num_tracks = len(raw_tracks)
+    cddb_id    = disc_info["freedb_id"]
+    mb_disc_id = disc_info["mb_id"]
+    offsets    = disc_info["offsets"]
+    total_secs = disc_info["total_seconds"]
+    raw_tracks = disc_info["tracks"]
+    num_tracks = len(raw_tracks)
 
-        # 1. Cache
-        cached = self._cache_get(cddb_id, mb_disc_id)
-        if cached:
-            return cached
+    # 2. From disc text
+    out = subprocess.run(
+        ["cd-info", "--no-device-info", "--no-cddb", device],
+        capture_output=True, text=True, check=True,
+    ).stdout
 
-        # 2. From disc text
-        out = subprocess.run(
-            ["cd-info", "--no-device-info", "--no-cddb", device],
-            capture_output=True, text=True, check=True,
-        ).stdout
+    disc, tracks, current = {}, {}, None
+    for line in out.splitlines():
+        if re.match(r"\s*CD-TEXT for Disc", line):
+            current = disc
+        elif (m := re.match(r"\s*CD-TEXT for Track\s+(\d+)", line)):
+            current = tracks.setdefault(int(m.group(1)), {})
+        elif current is not None and (m := re.match(r"\s+([A-Z_]+):\s*(.*)", line)):
+            current[m.group(1).lower()] = m.group(2).strip()
 
-        disc, tracks, current = {}, {}, None
-        for line in out.splitlines():
-            if re.match(r"\s*CD-TEXT for Disc", line):
-                current = disc
-            elif (m := re.match(r"\s*CD-TEXT for Track\s+(\d+)", line)):
-                current = tracks.setdefault(int(m.group(1)), {})
-            elif current is not None and (m := re.match(r"\s+([A-Z_]+):\s*(.*)", line)):
-                current[m.group(1).lower()] = m.group(2).strip()
+    mb = _fetch_from_mb_by_metadata(artist=disc.get("performer"),
+                                    album=disc.get("title"),
+                                    raw_tracks=[tracks[n].get("title", "") for n in sorted(tracks)])
+    if mb:
+        log.info("MB Found from CD-TEXT + MusicBrainz")
 
-        mb = _fetch_from_mb_by_metadata(artist=disc.get("performer"),
-                                        album=disc.get("title"),
-                                        raw_tracks=[tracks[n].get("title", "") for n in sorted(tracks)])
+    # 3. MusicBrainz — primary disc-ID lookup
+    if not mb:
+        mb = _fetch_from_mb(mb_disc_id, num_tracks, offsets, total_secs, raw_tracks)
         if mb:
-            log.info("MB Found from CD-TEXT + MusicBrainz")
+            log.info("MB Found from DiscID + MusicBrainz")
 
-        # 3. MusicBrainz — primary disc-ID lookup
-        if not mb:
-            mb = _fetch_from_mb(mb_disc_id, num_tracks, offsets, total_secs, raw_tracks)
-            if mb:
-                log.info("MB Found from DiscID + MusicBrainz")
+    if mb:
+        log.info(f"Identified MB release: https://musicbrainz.org/release/{mb['mbid']}")
+        artist = mb["artist"]
+        album  = mb["album"]
+    else:
+        artist = album = ""
 
-        if mb:
-            log.info(f"Identified MB release: https://musicbrainz.org/release/{mb['mbid']}")
-            artist = mb["artist"]
-            album  = mb["album"]
+    # 4. iTunes — second opinion + art
+    itunes = _fetch_from_itunes(artist, album, cddb_id) if artist else None
+
+    # Consensus: if iTunes confirms the artist, mark as high-confidence
+    if mb and itunes and itunes.get("itunes_artist"):
+        if _names_overlap(artist, itunes["itunes_artist"]):
+            log.info("MB + iTunes agree on '%s' — high confidence", artist)
         else:
-            artist = album = ""
+            log.info("MB says '%s', iTunes says '%s' — using MB", artist,
+                        itunes.get("itunes_artist", "?"))
 
-        # 4. iTunes — second opinion + art
-        itunes = _fetch_from_itunes(artist, album, cddb_id) if artist else None
+    if not mb:
+        log.info("No metadata found for disc %s", cddb_id)
+        return _unknown(raw_tracks)
 
-        # Consensus: if iTunes confirms the artist, mark as high-confidence
-        if mb and itunes and itunes.get("itunes_artist"):
-            if _names_overlap(artist, itunes["itunes_artist"]):
-                log.info("MB + iTunes agree on '%s' — high confidence", artist)
-            else:
-                log.info("MB says '%s', iTunes says '%s' — using MB", artist,
-                         itunes.get("itunes_artist", "?"))
+    # 5. Art: iTunes → Deezer → MusicBrainz CAA
+    art_path = (
+        (itunes or {}).get("art_path")
+        or _fetch_art_deezer(artist, album, cddb_id)
+        or _fetch_art_caa(mb.get("mbid", ""), cddb_id)
+    )
 
-        if not mb:
-            log.info("No metadata found for disc %s", cddb_id)
-            return self._unknown(raw_tracks)
+    meta = {
+        "artist":   mb["artist"],
+        "album":    mb["album"],
+        "year":     mb["year"],
+        "tracks":   mb["tracks"],
+        "mbid":     mb["mbid"],
+        "art_path": art_path,
+    }
 
-        # 5. Art: iTunes → Deezer → MusicBrainz CAA
-        art_path = (
-            (itunes or {}).get("art_path")
-            or _fetch_art_deezer(artist, album, cddb_id)
-            or _fetch_art_caa(mb.get("mbid", ""), cddb_id)
-        )
+    return meta
 
-        meta = {
-            "artist":   mb["artist"],
-            "album":    mb["album"],
-            "year":     mb["year"],
-            "tracks":   mb["tracks"],
-            "mbid":     mb["mbid"],
-            "art_path": art_path,
-        }
-        self._cache_put(cddb_id, mb_disc_id, meta)
-        return meta
+def fetch_album_metadata(self, artist: str, album: str,
+                            year: Optional[str] = None) -> Dict:
+    """Fetch metadata for a library album."""
+    result = _fetch_from_discogs(artist, album)
+    if result:
+        return result
+    itunes   = _fetch_from_itunes(artist, album, hashlib.md5(f"{artist}{album}".encode()).hexdigest())
+    art_path = (itunes or {}).get("art_path") or \
+                _fetch_art_deezer(artist, album, hashlib.md5(f"{artist}{album}".encode()).hexdigest())
+    return {"artist": artist, "album": album, "year": year or "",
+            "tracks": [], "art_path": art_path}
 
-    def fetch_album_metadata(self, artist: str, album: str,
-                             year: Optional[str] = None) -> Dict:
-        """Fetch metadata for a library album."""
-        result = _fetch_from_discogs(artist, album)
-        if result:
-            return result
-        itunes   = _fetch_from_itunes(artist, album, hashlib.md5(f"{artist}{album}".encode()).hexdigest())
-        art_path = (itunes or {}).get("art_path") or \
-                   _fetch_art_deezer(artist, album, hashlib.md5(f"{artist}{album}".encode()).hexdigest())
-        return {"artist": artist, "album": album, "year": year or "",
-                "tracks": [], "art_path": art_path}
-
-    # ── Helpers ───────────────────────────────────────────────────────────────
-    @staticmethod
-    def _parse_discid_str(raw: Optional[str]) -> Optional[dict]:
-        if not raw:
-            return None
-        from .cd_handler import CDHandler
-        return CDHandler().parse_toc(raw)
-
-    @staticmethod
-    def _unknown(raw_tracks: List[Dict]) -> Dict:
-        return {"artist": "Unknown Artist", "album": "Unknown CD",
-                "year": "", "tracks": raw_tracks, "art_path": None}
+def _unknown(raw_tracks: List[Dict]) -> Dict:
+    return {"artist": "Unknown Artist", "album": "Unknown CD",
+            "year": "", "tracks": raw_tracks, "art_path": None}

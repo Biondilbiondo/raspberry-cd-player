@@ -66,6 +66,7 @@ TRACK_LIST_Y   = 548
 VISIBLE_TRACKS = 8
 INDICATOR_X    = WIDTH - 70
 INDICATOR_R    = 10
+BACK_BUTTON_RECT = pygame.Rect(0, 0, 40, 40)
 
 
 def _pick_rotation() -> int:
@@ -139,6 +140,11 @@ class UI:
     # -- Output ---------------------------------------------------------------
     def present(self):
         """Rotate/scale the canvas onto the real display and flip."""
+        if os.environ.get("SHOW_CURSOR") == "1":
+            mouse_pos = pygame.mouse.get_pos()
+            canvas_pos = self.to_canvas(mouse_pos)
+            pygame.draw.circle(self.screen, (255, 0, 0), canvas_pos, 5)
+
         frame = pygame.transform.rotate(self.screen, self._rot) if self._rot else self.screen
         if self._scaled:
             self._display.blit(frame, (0, 0))
@@ -248,6 +254,14 @@ class UI:
         secs = max(0, int(secs))
         return f"{secs // 60}:{secs % 60:02d}"
 
+    def draw_back_button(self, x: int, y: int):
+        pygame.draw.circle(self.screen, C_ACCENT, (x, y), 20)
+        pygame.draw.line(self.screen, C_BG, (x-10, y), (x+5, y-10), 5)
+        pygame.draw.line(self.screen, C_BG, (x-10, y), (x+5, y+10), 5)
+
+    def is_back_button_at(self, x: int, y: int, bx: int=40-20, by: int=25-20) -> bool:
+        return bx <= x <= bx + BACK_BUTTON_RECT.width and by <= y <= by + BACK_BUTTON_RECT.height
+
     # -- Loading / message overlays -------------------------------------------
     def show_loading(self, text: str = "Loading..."):
         self._is_loading = True
@@ -288,6 +302,7 @@ class UI:
     def draw_library(self, albums: List[Dict], selected: int):
         self._is_loading = False
         self.screen.fill(C_BG)
+        self.draw_back_button(40, 25)
         self._draw_text_centered("Library", self.font_bold, 15, C_ACCENT)
         pygame.draw.line(self.screen, C_ACCENT, (20, 50), (WIDTH - 20, 50), 1)
 
@@ -336,6 +351,7 @@ class UI:
         self._is_loading = False
         self.screen.fill(C_BG)
         tracklist = tracklist or []
+        self.draw_back_button(40, 25)
 
         # Header
         artist = album_info.get("artist", "Unknown Artist")
@@ -424,40 +440,42 @@ class UI:
 
         self._draw_message_overlay()
 
-    def draw_wrapped(self, summary: Dict):
-        self._is_loading = False
-        self.screen.fill(C_BG)
-        self._draw_text_centered("Music Wrapped", self.font_bold, 20, C_ACCENT)
-        pygame.draw.line(self.screen, C_ACCENT, (20, 65), (WIDTH - 20, 65), 1)
+    # -- Hit Testing ----------------------------------------------------------
+    def get_menu_item_at(self, x: int, y: int, items_count: int) -> Optional[int]:
+        item_h = 70
+        start_y = 130
+        for i in range(items_count):
+            item_y = start_y + i * item_h
+            if 10 <= x <= WIDTH - 10 and item_y - 8 <= y <= item_y + item_h - 18:
+                return i
+        return None
 
-        y = 85
-        dy = 28
+    def get_library_album_at(self, x: int, y: int, albums_count: int, selected: int) -> Optional[int]:
+        if albums_count == 0:
+            return None
+        item_h = 60
+        vis = (HEIGHT - 60) // item_h
+        start_i = max(0, min(selected - vis // 2, albums_count - vis))
+        y_cursor = 60
+        for i in range(start_i, min(start_i + vis, albums_count)):
+            if 5 <= x <= WIDTH - 5 and y_cursor <= y <= y_cursor + item_h - 4:
+                return i
+            y_cursor += item_h
+        return None
 
-        def row(label, value, color=C_TEXT):
-            nonlocal y
-            label_s = self.font_small.render(label, True, C_SUBTEXT)
-            self.screen.blit(label_s, (20, y))
-            val_s = self._render_text(value, self.font_small, color,
-                                      WIDTH - 40 - label_s.get_width() - 10)
-            self.screen.blit(val_s, (WIDTH - val_s.get_width() - 20, y))
-            y += dy
-
-        row("Total plays", summary.get("total_plays", 0), C_WHITE)
-        row("Top artist",  summary.get("top_artist", "-"), C_ACCENT)
-        row("Top album",   summary.get("top_album", "-"), C_WHITE)
-        row("Top track",   summary.get("top_track", "-"), C_ACCENT)
-
-        y += 10
-        self._draw_text_centered("Recent plays", self.font_bold, y, C_WHITE)
-        y += dy + 5
-        for entry in (summary.get("recent") or [])[:8]:
-            self._draw_text_left(f"  {entry.get('artist', '')} - {entry.get('title', '')}",
-                                 self.font_small, 20, y, C_TEXT)
-            y += dy
-            if y > HEIGHT - 30:
+    def get_playback_track_at(self, x: int, y: int, tracklist_count: int) -> Optional[int]:
+        if tracklist_count == 0:
+            return None
+        tl_y = TRACK_LIST_Y
+        row_h = (HEIGHT - tl_y) // VISIBLE_TRACKS
+        for row in range(VISIBLE_TRACKS):
+            i = self._track_scroll + row
+            if i >= tracklist_count:
                 break
-
-        self._draw_text_centered("UP/DOWN: BACK", self.font_small, HEIGHT - 24, C_SUBTEXT)
+            y_row = tl_y + row * row_h
+            if 0 <= x <= WIDTH and y_row <= y <= y_row + row_h:
+                return i
+        return None
 
 
 if __name__ == "__main__":

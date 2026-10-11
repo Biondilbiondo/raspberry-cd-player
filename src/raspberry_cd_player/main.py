@@ -11,6 +11,7 @@ import threading
 import logging
 import os
 import configparser
+from typing import Union
 
 config = configparser.ConfigParser()
 config.read('config.ini')
@@ -24,9 +25,9 @@ import pygame
 
 from .player import Player
 from .ui import UI
-from .metadata_manager import MetadataManager
+from .metadata_manager import fetch_cd_metadata, fetch_album_metadata
 from .cd_handler import CDHandler
-from .input_handler import InputHandler, InputEvent
+from .input_handler import InputHandler, InputEvent, ClickEvent
 from .library_manager import LibraryManager
 from .cd_rip import _rip_chain, _rip_done_file, _rip_doing_file, _rip_wav_file, _rip_estimated_len_s
 
@@ -44,7 +45,6 @@ class State:
     LIBRARY_BROWSE  = "library_browse"
     CD_LOADING      = "cd_loading"
     PLAYBACK        = "playback"
-    WRAPPED_SUMMARY = "wrapped_summary"
 
 
 class MusicPlayer:
@@ -54,7 +54,6 @@ class MusicPlayer:
 
         self.player   = Player()
         self.ui       = UI()
-        self.metadata = MetadataManager()
         self.cd       = CDHandler()
         self.library  = LibraryManager()
         self.input    = InputHandler()
@@ -67,7 +66,7 @@ class MusicPlayer:
         self.paused         = False
         self.source         = None # "CD-RIP", "library"
 
-        self.main_menu_items = ["Play CD", "Library", "Music Wrapped", "Quit"]
+        self.main_menu_items = ["Play CD", "Library", "Quit"]
         self.main_menu_sel   = 0
         self.library_albums  = []
         self.library_sel     = 0
@@ -118,16 +117,19 @@ class MusicPlayer:
         return status
 
     def _kill_rip(self):
-        if not self.is_ripping:
+        if not self.is_ripping or self._rip_process is None:
             return
-        import signal
         log.info("Trying to kill previous ripping process")
-        pid = self._rip_process.pid
-        os.killpg(pid, signal.SIGKILL)
-        while self.is_ripping:
-            log.info("Waiting killed ripping process")
-            time.sleep(1)
-        log.info("Process killed")
+        try:
+            self._rip_process.kill()
+            self._rip_process.join(timeout=5)
+        except Exception as e:
+            log.error("Error killing ripping process: %s", e)
+        
+        if self.is_ripping:
+            log.warning("Ripping process did not terminate in time")
+        else:
+            log.info("Process killed")
         
         for name in os.listdir(self._rip_dir):
             path = os.path.join(self._rip_dir, name)
@@ -172,6 +174,20 @@ class MusicPlayer:
             self.state = State.MAIN_MENU
             return
 
+## TODO
+# 2026-10-11 22:28:29,150 [INFO] player: Initialising player (python-mpv)…
+# 2026-10-11 22:28:29,277 [INFO] ui: Display 540x960, rotation 0, scaled=True
+# 2026-10-11 22:28:29,317 [INFO] main: CD inserted – triggering load
+# 2026-10-11 22:28:29,330 [INFO] cd_handler: CD drive speed set to 16x
+# 2026-10-11 22:28:37,180 [ERROR] cd_handler: cd-discid failed: cannot open device `/dev/cdrom'
+# 2026-10-11 22:28:37,180 [ERROR] main: Scheduled call failed: tuple indices must be integers or slices, not str
+# Traceback (most recent call last):
+#   File "/home/mattia/Progetti/raspberry-cd-player/src/raspberry_cd_player/main.py", line 389, in run
+#     ev.fn(*ev.args)
+#     ~~~~~^^^^^^^^^^
+#   File "/home/mattia/Progetti/raspberry-cd-player/src/raspberry_cd_player/main.py", line 179, in _load_cd
+#     if not _disc_info['tracks']:
+
         _disc_info = self.cd.get_disc_info()
 
         if not _disc_info['tracks']:
@@ -186,7 +202,7 @@ class MusicPlayer:
         vault_key = _disc_info["mb_id"]
 
         self._rip_dir = os.path.join(CACHE_DIR, vault_key)
-        meta    = self.metadata.fetch_cd_metadata(_disc_info)
+        meta    = fetch_cd_metadata(_disc_info)
 
         self.album_info = meta
         self.tracklist  = meta.get("tracks", _disc_info['tracks'])
@@ -211,7 +227,7 @@ class MusicPlayer:
     def _load_library_album(self, album):
         self.ui.show_loading(f"Loading {album.get('title', '?')}…")
         local_tracks = album.get("tracks", [])
-        meta = self.metadata.fetch_album_metadata(
+        meta = fetch_album_metadata(
             album.get("artist", ""), album.get("title", ""), album.get("year")
         )
         # MusicBrainz tracks have no file paths — always use the local tracks
@@ -287,8 +303,34 @@ class MusicPlayer:
         self.paused = False
         log.info("Playing track %d: %s", idx + 1, track.get("title"))
 
-    def _handle_input(self, event: InputEvent):
+    def _handle_input(self, event: Union[InputEvent, ClickEvent]):
         s = self.state
+
+        # ── Mouse Click ──────────────────────────────────────────────────────
+        if isinstance(event, ClickEvent):
+            cx, cy = self.ui.to_canvas((event.x, event.y))
+            if s == State.MAIN_MENU:
+                idx = self.ui.get_menu_item_at(cx, cy, len(self.main_menu_items))
+                if idx is not None:
+                    self.main_menu_sel = idx
+                    self._main_menu_select()
+            elif s == State.LIBRARY_BROWSE:
+                if self.ui.is_back_button_at(cx, cy):
+                    self.state = State.MAIN_MENU
+                else:
+                    idx = self.ui.get_library_album_at(cx, cy, len(self.library_albums), self.library_sel)
+                    if idx is not None:
+                        self.library_sel = idx
+                        self._load_library_album(self.library_albums[idx])
+            elif s == State.PLAYBACK:
+                if self.ui.is_back_button_at(cx, cy):
+                    self.player.stop()
+                    self.state = self.prev_state or State.MAIN_MENU
+                else:
+                    idx = self.ui.get_playback_track_at(cx, cy, len(self.tracklist))
+                    if idx is not None:
+                        self._play_track(idx)
+            return
 
         # ── Main menu ─────────────────────────────────────────────────────────
         if s == State.MAIN_MENU:
@@ -333,11 +375,6 @@ class MusicPlayer:
                 self.player.stop()
                 self.state = self.prev_state or State.MAIN_MENU
 
-        # ── Wrapped summary ───────────────────────────────────────────────────
-        elif s == State.WRAPPED_SUMMARY:
-            if event in (InputEvent.BACK, InputEvent.FIRE):
-                self.state = State.MAIN_MENU
-
     def _main_menu_select(self):
         item = self.main_menu_items[self.main_menu_sel]
         if item == "Play CD":
@@ -350,9 +387,8 @@ class MusicPlayer:
             self.library_sel    = 0
             self.prev_state     = State.MAIN_MENU
             self.state          = State.LIBRARY_BROWSE
-        elif item == "Music Wrapped":
-            self.state = State.WRAPPED_SUMMARY
         elif item == "Quit":
+            log.info("Quit selected, exiting...")
             self._running = False
 
 
@@ -400,7 +436,7 @@ class MusicPlayer:
                     duration      = self._playback_dur,
                 )
 
-            pygame.display.flip()
+            self.ui.present()
             clock.tick(30)
 
         self.player.stop()

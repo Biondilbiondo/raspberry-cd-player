@@ -24,8 +24,9 @@ Hat-motion (D-pad style) is also supported as a fallback.
 
 import logging
 import time
+from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Optional
+from typing import Optional, Union
 
 import pygame
 
@@ -45,6 +46,12 @@ class InputEvent(Enum):
     RIGHT = auto()
     FIRE  = auto()
     BACK  = auto()
+
+
+@dataclass(frozen=True)
+class ClickEvent:
+    x: int
+    y: int
 
 
 class InputHandler:
@@ -69,12 +76,16 @@ class InputHandler:
         self._btn0_down_at: Optional[float] = None
 
     # ── Public interface ──────────────────────────────────────────────────────
-    def process(self, event: pygame.event.Event) -> Optional[InputEvent]:
+    def process(self, event: pygame.event.Event) -> Optional[Union[InputEvent, ClickEvent]]:
         """
         Call once per pygame event.
-        Returns an InputEvent or None if the event should be ignored.
+        Returns an InputEvent, a ClickEvent or None if the event should be ignored.
         """
         et = event.type
+
+        # ── Mouse ────────────────────────────────────────────────────────────
+        if et == pygame.MOUSEBUTTONDOWN:
+            return ClickEvent(event.pos[0], event.pos[1])
 
         # ── Buttons ───────────────────────────────────────────────────────────
         if et == pygame.JOYBUTTONDOWN:
