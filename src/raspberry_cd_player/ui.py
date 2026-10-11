@@ -1,31 +1,40 @@
 #!/usr/bin/env python3
 """
-ui.py - Pygame UI for 480×800 portrait display (DRM/KMS).
+ui.py - Pygame UI for the HiFiBerry CD player (DRM/KMS, 480x800 portrait design).
 
-Layout (playback screen)
-------------------------
-┌──────────────────────────────┐  ← 480 wide
-│  Artist (big)                │  0–44 px
-│  Album  (big)                │  44–88 px
-│  Year   (small)              │  88–100 px
-│    Album Art  400×400        │  100–500 px
-│  ── Now Playing title ──     │  508–545 px
-│  Scrollable tracklist        │  548–800 px
-└──────────────────────────────┘
+All drawing happens on a fixed 480x800 portrait canvas (UI.screen).
+UI.present() rotates and scales that canvas onto the real display, so the same
+code works whether the kernel exposes the panel as portrait (1080x1920) or as
+landscape (1920x1080). Call ui.present() instead of pygame.display.flip().
+
+Environment variables
+---------------------
+UI_ROT=0|90|180|270   force software rotation (default: auto-detect from the
+                      panel's size; landscape panel -> 90, portrait panel -> 0).
+                      If the picture is upside down, swap 90 <-> 270.
+UI_WINDOWED=1         run in a window instead of fullscreen (desktop testing)
+
+Playback screen layout (canvas coordinates)
+-------------------------------------------
+  6 -  48   Artist
+ 52 -  88   Album (year)
+ 92 - 492   Album art 400x400
+500 - 530   Now playing title
+530 - 538   Progress bar
+548 - 800   Scrollable tracklist (8 rows)
 """
 
 import logging
 import os
-import io
 import time
-from typing import List, Dict, Optional
+from typing import Dict, List, Optional, Tuple
 
 import pygame
 
 log = logging.getLogger("ui")
 
-WIDTH  = 480
-HEIGHT = 800
+WIDTH = 540
+HEIGHT = 960
 
 # Colour palette
 C_BG        = (15,  15,  20)
@@ -36,142 +45,231 @@ C_HIGHLIGHT = (40,  40,  55)
 C_PLAYING   = (255, 165,  0)
 C_WHITE     = (255, 255, 255)
 C_PROGRESS  = (80,  80,  90)
-C_RIPPED    = (150,  150,  150)
+C_RIPPED    = (150, 150, 150)
+C_ART_BG    = (40,  40,  50)
 
+# Default pygame font sizes
 FONT_TITLE_SIZE    = 40   # artist name
 FONT_SUBTITLE_SIZE = 32   # album name
-FONT_BOLD_SIZE     = 22
-FONT_NORMAL_SIZE   = 18
-FONT_SMALL_SIZE    = 15
+FONT_BOLD_SIZE     = 32
+FONT_NORMAL_SIZE   = 26
+FONT_SMALL_SIZE    = 21
+
+ELLIPSIS = "..."          # ASCII on purpose: the default font may lack U+2026
 
 ART_SIZE = (400, 400)
-ART_Y    = 92             # two-line header: artist + album(year)
+ART_Y    = 92
+ART_CACHE_MAX    = 8
+ART_RETRY_SECS   = 5.0    # retry a failed cover load after this long (art may arrive late)
 
-TRACK_LIST_Y       = 548
-TRACK_LIST_HEIGHT  = HEIGHT - TRACK_LIST_Y
-VISIBLE_TRACKS     = 8
+TRACK_LIST_Y   = 548
+VISIBLE_TRACKS = 8
+INDICATOR_X    = WIDTH - 70
+INDICATOR_R    = 10
+
+
+def _pick_rotation() -> int:
+    """Software rotation (degrees counter-clockwise) needed to show a portrait canvas."""
+    env = os.environ.get("UI_ROT")
+    if env is not None:
+        try:
+            rot = int(env)
+            if rot in (0, 90, 180, 270):
+                return rot
+        except ValueError:
+            pass
+        log.warning("Ignoring invalid UI_ROT=%r", env)
+    try:
+        dw, dh = pygame.display.get_desktop_sizes()[0]
+    except (pygame.error, IndexError):
+        return 0
+    return 90 if dw > dh else 0
 
 
 class UI:
     def __init__(self):
-        # Alustetaan pygame display-moduuli erikseen
         if not pygame.display.get_init():
             pygame.display.init()
-            
-        # Trixie/Python 3.13 saattaa vaatia, että SDL tietää mikä DRM-kortti on käytössä
-        # Jos kmsdrm ei toimi, kokeillaan poistaa FULLSCREEN ja käyttää tavallista modea
-        log.info("Yritetään avata näyttö...")
-        
+        if not pygame.font.get_init():
+            pygame.font.init()
+
+        self._rot = _pick_rotation()
+        self._frame_size = (HEIGHT, WIDTH) if self._rot in (90, 270) else (WIDTH, HEIGHT)
+
+        flags = 0 if os.environ.get("UI_WINDOWED") else pygame.FULLSCREEN
+        self._scaled = True
         try:
-            # Kokeillaan ensin ilman FULLSCREEN-lippua, jos se aiheuttaa ongelmia DRM:n kanssa
-            self.screen = pygame.display.set_mode(
-                (WIDTH, HEIGHT),
-                pygame.NOFRAME
-            )
+            # SCALED: SDL stretches this small surface to the panel (aspect kept, black bars)
+            self._display = pygame.display.set_mode(self._frame_size, flags | pygame.SCALED)
         except pygame.error as e:
-            log.error(f"Näytön avaaminen epäonnistui: {e}")
-            # Viimeinen yritys täysin perusasetuksilla
-            self.screen = pygame.display.set_mode((WIDTH, HEIGHT))
+            log.warning("SCALED mode failed (%s); scaling manually", e)
+            self._scaled = False
+            self._display = pygame.display.set_mode((0, 0), flags)
+
+        dw, dh = self._display.get_size()
+        self._dest = pygame.Rect(0, 0, dw, dh)
+        if not self._scaled:
+            fw, fh = self._frame_size
+            k = min(dw / fw, dh / fh)
+            self._dest.size = (int(fw * k), int(fh * k))
+            self._dest.center = (dw // 2, dh // 2)
+        log.info("Display %dx%d, rotation %d, scaled=%s", dw, dh, self._rot, self._scaled)
+
+        # All drawing code uses self.screen: an off-screen 480x800 canvas
+        self.screen = pygame.Surface((WIDTH, HEIGHT))
 
         pygame.display.set_caption("HiFiBerry Player")
-        pygame.mouse.set_visible(False) # Piilotetaan kursori kerralla
+        pygame.mouse.set_visible(False)
+
         self._load_fonts()
-        # ... loput ennallaan ...
+        self._text_cache: Dict[tuple, pygame.Surface] = {}
         self._art_cache: Dict[str, pygame.Surface] = {}
+        self._art_failed: Dict[str, float] = {}
         self._placeholder = self._make_placeholder()
+
+        self._overlay = pygame.Surface((WIDTH, 60), pygame.SRCALPHA)
+        self._overlay.fill((0, 0, 0, 180))
         self._message_until = 0.0
-        self._message_text  = ""
-        self._loading_text  = ""
-        self._is_loading    = False
+        self._message_text = ""
+        self._loading_text = ""
+        self._is_loading = False
 
-        # tracklist scroll offset
-        self._track_scroll  = 0
+        self._track_scroll = 0
 
-    # ── Fonts ──────────────────────────────────────────────────────────────────
+    # -- Output ---------------------------------------------------------------
+    def present(self):
+        """Rotate/scale the canvas onto the real display and flip."""
+        frame = pygame.transform.rotate(self.screen, self._rot) if self._rot else self.screen
+        if self._scaled:
+            self._display.blit(frame, (0, 0))
+        else:
+            self._display.fill((0, 0, 0))
+            self._display.blit(pygame.transform.scale(frame, self._dest.size), self._dest.topleft)
+        pygame.display.flip()
+
+    def to_canvas(self, pos: Tuple[int, int]) -> Tuple[int, int]:
+        """Map a mouse/touch position from the real display to canvas coordinates."""
+        x, y = pos
+        fw, fh = self._frame_size
+        if not self._scaled:
+            x = (x - self._dest.x) * fw / self._dest.w
+            y = (y - self._dest.y) * fh / self._dest.h
+        x = max(0, min(fw - 1, int(x)))
+        y = max(0, min(fh - 1, int(y)))
+        if self._rot == 90:
+            return WIDTH - 1 - y, x
+        if self._rot == 270:
+            return y, HEIGHT - 1 - x
+        if self._rot == 180:
+            return WIDTH - 1 - x, HEIGHT - 1 - y
+        return x, y
+
+    # -- Fonts ----------------------------------------------------------------
     def _load_fonts(self):
-        try:
-            self.font_title    = pygame.font.Font(None, FONT_TITLE_SIZE)
-            self.font_subtitle = pygame.font.Font(None, FONT_SUBTITLE_SIZE)
-            self.font_bold     = pygame.font.Font(None, FONT_BOLD_SIZE + 10)
-            self.font_normal   = pygame.font.Font(None, FONT_NORMAL_SIZE + 8)
-            self.font_small    = pygame.font.Font(None, FONT_SMALL_SIZE + 6)
-        except Exception:
-            self.font_title = self.font_subtitle = self.font_bold = \
-                self.font_normal = self.font_small = pygame.font.Font(None, 24)
+        self.font_title    = pygame.font.Font(None, FONT_TITLE_SIZE)
+        self.font_subtitle = pygame.font.Font(None, FONT_SUBTITLE_SIZE)
+        self.font_bold     = pygame.font.Font(None, FONT_BOLD_SIZE)
+        self.font_normal   = pygame.font.Font(None, FONT_NORMAL_SIZE)
+        self.font_small    = pygame.font.Font(None, FONT_SMALL_SIZE)
 
-    # ── Helpers ───────────────────────────────────────────────────────────────
+    # -- Helpers --------------------------------------------------------------
     def _make_placeholder(self) -> pygame.Surface:
+        """Cover placeholder with a drawn music note (no font glyph needed)."""
         surf = pygame.Surface(ART_SIZE)
-        surf.fill((40, 40, 50))
-        txt = self.font_bold.render("♪", True, C_ACCENT)
-        rect = txt.get_rect(center=(ART_SIZE[0] // 2, ART_SIZE[1] // 2))
-        surf.blit(txt, rect)
+        surf.fill(C_ART_BG)
+        cx, cy = ART_SIZE[0] // 2, ART_SIZE[1] // 2
+        pygame.draw.ellipse(surf, C_ACCENT, (cx - 60, cy + 20, 70, 50))
+        pygame.draw.rect(surf, C_ACCENT, (cx + 2, cy - 80, 10, 105))
+        pygame.draw.polygon(surf, C_ACCENT,
+                            [(cx + 12, cy - 80), (cx + 60, cy - 50), (cx + 60, cy - 28), (cx + 12, cy - 55)])
         return surf
 
-    def _render_text(self, text: str, font, color=C_TEXT, max_width=WIDTH - 20) -> pygame.Surface:
-        """Render text, truncating with ellipsis if too wide."""
-        surf = font.render(text, True, color)
-        if surf.get_width() > max_width:
-            while text and font.render(text + "…", True, color).get_width() > max_width:
-                text = text[:-1]
-            surf = font.render(text + "…", True, color)
+    def _render_text(self, text: str, font, color=C_TEXT, max_width: int = WIDTH - 20) -> pygame.Surface:
+        """Render text, truncating with an ellipsis if too wide. Results are cached."""
+        text = str(text)
+        key = (text, id(font), color, max_width)
+        surf = self._text_cache.get(key)
+        if surf is not None:
+            return surf
+
+        if font.size(text)[0] <= max_width:
+            surf = font.render(text, True, color)
+        else:
+            lo, hi = 0, len(text)          # binary search: longest prefix that fits
+            while lo < hi:
+                mid = (lo + hi + 1) // 2
+                if font.size(text[:mid].rstrip() + ELLIPSIS)[0] <= max_width:
+                    lo = mid
+                else:
+                    hi = mid - 1
+            surf = font.render(text[:lo].rstrip() + ELLIPSIS, True, color)
+
+        if len(self._text_cache) > 300:
+            self._text_cache.clear()
+        self._text_cache[key] = surf
         return surf
 
-    def _draw_text_centered(self, text: str, font, y: int, color=C_TEXT):
-        surf = self._render_text(text, font, color)
-        rect = surf.get_rect(centerx=WIDTH // 2, y=y)
-        self.screen.blit(surf, rect)
+    def _draw_text_centered(self, text: str, font, y: int, color=C_TEXT, max_width: int = WIDTH - 20):
+        surf = self._render_text(text, font, color, max_width)
+        self.screen.blit(surf, surf.get_rect(centerx=WIDTH // 2, y=y))
 
     def _draw_text_left(self, text: str, font, x: int, y: int, color=C_TEXT, max_width: int = WIDTH - 20):
-        surf = self._render_text(text, font, color, max_width)
-        self.screen.blit(surf, (x, y))
-
-    def _draw_progress_bar(self, x, y, w, h, fraction: float, bg=C_PROGRESS, fg=C_ACCENT):
-        pygame.draw.rect(self.screen, bg, (x, y, w, h), border_radius=4)
-        if fraction > 0:
-            pygame.draw.rect(self.screen, fg, (x, y, int(w * fraction), h), border_radius=4)
+        self.screen.blit(self._render_text(text, font, color, max_width), (x, y))
 
     def _load_art(self, path: Optional[str]) -> pygame.Surface:
         if not path:
             return self._placeholder
         if path in self._art_cache:
             return self._art_cache[path]
+        failed_at = self._art_failed.get(path)
+        if failed_at is not None and time.monotonic() - failed_at < ART_RETRY_SECS:
+            return self._placeholder
         try:
-            surf = pygame.image.load(path).convert()
-            surf = pygame.transform.smoothscale(surf, ART_SIZE)
-            self._art_cache[path] = surf
-            return surf
-        except Exception:
-            log.debug("Could not load art: %s", path)
+            img = pygame.image.load(path).convert()
+            iw, ih = img.get_size()
+            k = min(ART_SIZE[0] / iw, ART_SIZE[1] / ih)       # fit, keep aspect ratio
+            img = pygame.transform.smoothscale(img, (max(1, int(iw * k)), max(1, int(ih * k))))
+            surf = pygame.Surface(ART_SIZE)
+            surf.fill(C_ART_BG)
+            surf.blit(img, img.get_rect(center=(ART_SIZE[0] // 2, ART_SIZE[1] // 2)))
+        except Exception as e:  # noqa: BLE001
+            log.warning("Could not load art %s: %s", path, e)
+            self._art_failed[path] = time.monotonic()
             return self._placeholder
 
-    def _format_seconds(self, secs: float) -> str:
+        self._art_failed.pop(path, None)
+        if len(self._art_cache) >= ART_CACHE_MAX:
+            self._art_cache.pop(next(iter(self._art_cache)))
+        self._art_cache[path] = surf
+        return surf
+
+    @staticmethod
+    def _format_seconds(secs: float) -> str:
         secs = max(0, int(secs))
         return f"{secs // 60}:{secs % 60:02d}"
 
-    # ── Loading / message overlays ────────────────────────────────────────────
-    def show_loading(self, text: str = "Loading…"):
-        self._is_loading    = True
-        self._loading_text  = text
+    # -- Loading / message overlays -------------------------------------------
+    def show_loading(self, text: str = "Loading..."):
+        self._is_loading = True
+        self._loading_text = text
         self.screen.fill(C_BG)
         self._draw_text_centered(text, self.font_bold, HEIGHT // 2 - 20, C_ACCENT)
-        pygame.display.flip()
+        self.present()
 
     def show_message(self, text: str, duration: float = 2.0):
-        self._message_text  = text
-        self._message_until = time.time() + duration
+        self._message_text = text
+        self._message_until = time.monotonic() + duration
 
     def _draw_message_overlay(self):
-        if time.time() < self._message_until:
-            overlay = pygame.Surface((WIDTH, 60), pygame.SRCALPHA)
-            overlay.fill((0, 0, 0, 180))
-            self.screen.blit(overlay, (0, HEIGHT // 2 - 30))
+        if time.monotonic() < self._message_until:
+            self.screen.blit(self._overlay, (0, HEIGHT // 2 - 30))
             self._draw_text_centered(self._message_text, self.font_bold, HEIGHT // 2 - 12, C_WHITE)
 
-    # ── Screens ───────────────────────────────────────────────────────────────
+    # -- Screens --------------------------------------------------------------
     def draw_main_menu(self, items: List[str], selected: int):
+        self._is_loading = False
         self.screen.fill(C_BG)
-        self._draw_text_centered("🎵  HiFiBerry Player", self.font_bold, 40, C_ACCENT)
+        self._draw_text_centered("HiFiBerry Player", self.font_bold, 40, C_ACCENT)
         pygame.draw.line(self.screen, C_ACCENT, (20, 80), (WIDTH - 20, 80), 1)
 
         item_h = 70
@@ -188,31 +286,38 @@ class UI:
         self._draw_message_overlay()
 
     def draw_library(self, albums: List[Dict], selected: int):
+        self._is_loading = False
         self.screen.fill(C_BG)
         self._draw_text_centered("Library", self.font_bold, 15, C_ACCENT)
         pygame.draw.line(self.screen, C_ACCENT, (20, 50), (WIDTH - 20, 50), 1)
 
         if not albums:
             self._draw_text_centered("No albums found", self.font_normal, HEIGHT // 2, C_SUBTEXT)
+            self._draw_message_overlay()
             return
 
-        item_h  = 60
-        vis     = (HEIGHT - 60) // item_h
-        start_i = max(0, selected - vis // 2)
-        y       = 60
+        item_h = 60
+        vis = (HEIGHT - 60) // item_h
+        # Centre the selection, but never scroll past the end of the list
+        start_i = max(0, min(selected - vis // 2, len(albums) - vis))
+        y = 60
 
         for i in range(start_i, min(start_i + vis, len(albums))):
             album = albums[i]
             is_sel = (i == selected)
             if is_sel:
                 pygame.draw.rect(self.screen, C_HIGHLIGHT, (5, y, WIDTH - 10, item_h - 4), border_radius=6)
-            label  = f"{album.get('artist','?')} – {album.get('title','?')}"
-            color  = C_ACCENT if is_sel else C_TEXT
-            self._draw_text_left(label, self.font_normal, 14, y + 10, color, WIDTH - 28)
+
+            label_w = WIDTH - 28
             year = album.get("year", "")
             if year:
                 yr_surf = self.font_small.render(str(year), True, C_SUBTEXT)
                 self.screen.blit(yr_surf, (WIDTH - yr_surf.get_width() - 14, y + 10))
+                label_w -= yr_surf.get_width() + 10   # keep the label clear of the year
+
+            label = f"{album.get('artist', '?')} - {album.get('title', '?')}"
+            self._draw_text_left(label, self.font_normal, 14, y + 10,
+                                 C_ACCENT if is_sel else C_TEXT, label_w)
             y += item_h
 
         self._draw_message_overlay()
@@ -225,100 +330,104 @@ class UI:
         paused:        bool,
         position:      float = 0,
         ripped_pos:    float = 0,
-        ripped_status: List = None,
+        ripped_status: Optional[List] = None,
         duration:      float = 0,
     ):
+        self._is_loading = False
         self.screen.fill(C_BG)
+        tracklist = tracklist or []
 
-        # ── Header ────────────────────────────────────────────────────────────
+        # Header
         artist = album_info.get("artist", "Unknown Artist")
-        album  = album_info.get("album",  "Unknown Album")
-        year   = str(album_info.get("year", ""))
+        album = album_info.get("album", "Unknown Album")
+        year = str(album_info.get("year", "") or "")
         album_line = f"{album} ({year})" if year else album
-        self._draw_text_centered(artist,     self.font_title,    6,  C_WHITE)
+        self._draw_text_centered(artist, self.font_title, 6, C_WHITE)
         self._draw_text_centered(album_line, self.font_subtitle, 52, C_SUBTEXT)
 
-        # ── Album art ─────────────────────────────────────────────────────────
-        art_path = album_info.get("art_path")
-        art = self._load_art(art_path)
-        art_x = (WIDTH - ART_SIZE[0]) // 2
-        self.screen.blit(art, (art_x, ART_Y))
+        # Album art
+        art = self._load_art(album_info.get("art_path"))
+        self.screen.blit(art, ((WIDTH - ART_SIZE[0]) // 2, ART_Y))
 
-        # ── Now playing ───────────────────────────────────────────────────────
+        # Now playing
         now_y = ART_Y + ART_SIZE[1] + 8
-        if tracklist and 0 <= current_track < len(tracklist):
-            track = tracklist[current_track]
-            title = track.get("title", f"Track {current_track + 1}")
+        if 0 <= current_track < len(tracklist):
+            title = tracklist[current_track].get("title", f"Track {current_track + 1}")
             self._draw_text_centered(title, self.font_bold, now_y, C_ACCENT)
 
-        # ── Progress bar + position dot ──────────────────────────────────────
+        # Progress bar + position dot
         bar_y = now_y + 30
         bar_x = 20
         bar_w = WIDTH - 40
         bar_h = 8
-        frac  = max(0.0, min(1.0, (position / duration) if duration > 0 else 0))
-        ripped_frac = max(0.0, min(1.0, (ripped_pos / duration) if duration > 0 else 0))
+        frac = max(0.0, min(1.0, position / duration)) if duration > 0 else 0.0
+        ripped_frac = max(0.0, min(1.0, ripped_pos / duration)) if duration > 0 else 0.0
 
-        # Track (background)
-        pygame.draw.rect(self.screen, C_PROGRESS,
-                         (bar_x, bar_y, bar_w, bar_h), border_radius=4)
-        # Filled portion
+        pygame.draw.rect(self.screen, C_PROGRESS, (bar_x, bar_y, bar_w, bar_h), border_radius=4)
         if ripped_frac > 0:
             pygame.draw.rect(self.screen, C_RIPPED,
                              (bar_x, bar_y, int(bar_w * ripped_frac), bar_h), border_radius=4)
-        # Filled portion
         if frac > 0:
             pygame.draw.rect(self.screen, C_ACCENT,
                              (bar_x, bar_y, int(bar_w * frac), bar_h), border_radius=4)
 
-        # Dot — amber when playing, grey when paused
-        dot_cx    = bar_x + int(bar_w * frac)
-        dot_cy    = bar_y + bar_h // 2
-        dot_color = C_ACCENT        if not paused else (105, 105, 120)
-        glow_col  = (100,  65,   0) if not paused else ( 45,  45,  55)
-        pygame.draw.circle(self.screen, glow_col,  (dot_cx, dot_cy), 8)
+        dot_cx = bar_x + int(bar_w * frac)
+        dot_cy = bar_y + bar_h // 2
+        dot_color = C_ACCENT if not paused else (105, 105, 120)
+        glow_col = (100, 65, 0) if not paused else (45, 45, 55)
+        pygame.draw.circle(self.screen, glow_col, (dot_cx, dot_cy), 8)
         pygame.draw.circle(self.screen, dot_color, (dot_cx, dot_cy), 5)
 
-        # ── Tracklist ─────────────────────────────────────────────────────────
-        tl_y   = TRACK_LIST_Y
+        # Tracklist
+        tl_y = TRACK_LIST_Y
         pygame.draw.line(self.screen, C_ACCENT, (20, tl_y - 5), (WIDTH - 20, tl_y - 5), 1)
 
-        # Auto-scroll to keep current track visible
-        if current_track < self._track_scroll:
-            self._track_scroll = current_track
-        elif current_track >= self._track_scroll + VISIBLE_TRACKS:
-            self._track_scroll = current_track - VISIBLE_TRACKS + 1
+        max_scroll = max(0, len(tracklist) - VISIBLE_TRACKS)
+        self._track_scroll = max(0, min(self._track_scroll, max_scroll))   # e.g. after album change
+        if 0 <= current_track < len(tracklist):
+            if current_track < self._track_scroll:
+                self._track_scroll = current_track
+            elif current_track >= self._track_scroll + VISIBLE_TRACKS:
+                self._track_scroll = current_track - VISIBLE_TRACKS + 1
 
+        title_x = 40
+        title_w = INDICATOR_X - INDICATOR_R - 6 - title_x      # keep clear of the status dot
         row_h = (HEIGHT - tl_y) // VISIBLE_TRACKS
         for row, i in enumerate(range(self._track_scroll, self._track_scroll + VISIBLE_TRACKS)):
             if i >= len(tracklist):
                 break
-            t   = tracklist[i]
-            y   = tl_y + row * row_h
+            t = tracklist[i]
+            y = tl_y + row * row_h
             is_cur = (i == current_track)
             if is_cur:
                 pygame.draw.rect(self.screen, C_HIGHLIGHT, (5, y, WIDTH - 10, row_h - 2), border_radius=5)
-            num   = f"{t.get('num', i+1):02d}"
-            title = t.get("title", f"Track {i+1}")
-            color = C_PLAYING if is_cur else C_TEXT
-            num_s = self.font_small.render(num, True, C_SUBTEXT)
-            self.screen.blit(num_s, (12, y + (row_h - num_s.get_height()) // 2))
-            self._draw_text_left(title, self.font_small, 40, y + (row_h - 15) // 2,
-                                 color, WIDTH - 55)
 
-            if ripped_status[i] == 'done':
+            try:
+                num = int(t.get("num", i + 1))
+            except (TypeError, ValueError):
+                num = i + 1
+            num_s = self.font_small.render(f"{num:02d}", True, C_SUBTEXT)
+            self.screen.blit(num_s, (12, y + (row_h - num_s.get_height()) // 2))
+
+            title_s = self._render_text(t.get("title", f"Track {i + 1}"), self.font_small,
+                                        C_PLAYING if is_cur else C_TEXT, title_w)
+            self.screen.blit(title_s, (title_x, y + (row_h - title_s.get_height()) // 2))
+
+            status = ripped_status[i] if ripped_status and i < len(ripped_status) else None
+            if status == "done":
                 indicator_col = C_ACCENT
-            elif ripped_status[i] == 'doing':
+            elif status == "doing":
                 indicator_col = C_RIPPED
             else:
                 indicator_col = C_PROGRESS
-            pygame.draw.circle(self.screen, indicator_col, (410, y + (row_h) // 2), 10 )
+            pygame.draw.circle(self.screen, indicator_col, (INDICATOR_X, y + row_h // 2), INDICATOR_R)
 
         self._draw_message_overlay()
 
     def draw_wrapped(self, summary: Dict):
+        self._is_loading = False
         self.screen.fill(C_BG)
-        self._draw_text_centered("🎵  Music Wrapped", self.font_bold, 20, C_ACCENT)
+        self._draw_text_centered("Music Wrapped", self.font_bold, 20, C_ACCENT)
         pygame.draw.line(self.screen, C_ACCENT, (20, 65), (WIDTH - 20, 65), 1)
 
         y = 85
@@ -326,26 +435,51 @@ class UI:
 
         def row(label, value, color=C_TEXT):
             nonlocal y
-            self._draw_text_left(label, self.font_small, 20, y, C_SUBTEXT)
-            val_s = self.font_small.render(str(value), True, color)
+            label_s = self.font_small.render(label, True, C_SUBTEXT)
+            self.screen.blit(label_s, (20, y))
+            val_s = self._render_text(value, self.font_small, color,
+                                      WIDTH - 40 - label_s.get_width() - 10)
             self.screen.blit(val_s, (WIDTH - val_s.get_width() - 20, y))
             y += dy
 
         row("Total plays", summary.get("total_plays", 0), C_WHITE)
-        row("Top artist",  summary.get("top_artist",  "—"), C_ACCENT)
-        row("Top album",   summary.get("top_album",   "—"), C_WHITE)
-        row("Top track",   summary.get("top_track",   "—"), C_ACCENT)
+        row("Top artist",  summary.get("top_artist", "-"), C_ACCENT)
+        row("Top album",   summary.get("top_album", "-"), C_WHITE)
+        row("Top track",   summary.get("top_track", "-"), C_ACCENT)
 
         y += 10
         self._draw_text_centered("Recent plays", self.font_bold, y, C_WHITE)
         y += dy + 5
-        for entry in summary.get("recent", [])[:8]:
-            self._draw_text_left(
-                f"  {entry.get('artist','')} – {entry.get('title','')}",
-                self.font_small, 20, y, C_TEXT
-            )
+        for entry in (summary.get("recent") or [])[:8]:
+            self._draw_text_left(f"  {entry.get('artist', '')} - {entry.get('title', '')}",
+                                 self.font_small, 20, y, C_TEXT)
             y += dy
             if y > HEIGHT - 30:
                 break
 
-        self._draw_text_centered("↑↓ BACK", self.font_small, HEIGHT - 24, C_SUBTEXT)
+        self._draw_text_centered("UP/DOWN: BACK", self.font_small, HEIGHT - 24, C_SUBTEXT)
+
+
+if __name__ == "__main__":
+    # Quick visual test:  uv run python ui.py      (ESC or Q to quit, ends after 20 s)
+    logging.basicConfig(level=logging.INFO)
+    pygame.init()
+    ui = UI()
+    info = {"artist": "Demo Artist", "album": "Demo Album", "year": 1999}
+    tracks = [{"num": n + 1, "title": f"Demo track {n + 1} with a very long title to test truncation"}
+              for n in range(12)]
+    clock = pygame.time.Clock()
+    t0 = time.monotonic()
+    running = True
+    while running and time.monotonic() - t0 < 20:
+        for ev in pygame.event.get():
+            if ev.type == pygame.QUIT or (ev.type == pygame.KEYDOWN and ev.key in (pygame.K_ESCAPE, pygame.K_q)):
+                running = False
+        t = time.monotonic() - t0
+        cur = int(t // 2) % len(tracks)
+        status = ["done" if i < cur else "doing" if i == cur else "todo" for i in range(len(tracks))]
+        ui.draw_playback(info, tracks, cur, False, position=t % 30, ripped_pos=min(30, t % 30 + 8),
+                         ripped_status=status, duration=30)
+        ui.present()
+        clock.tick(30)
+    pygame.quit()
