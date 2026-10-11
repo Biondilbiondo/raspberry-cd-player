@@ -27,6 +27,8 @@ import time
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Optional, Union
+from .ui import WIDTH as UI_WIDTH
+from .ui import HEIGHT as UI_HEIGHT
 
 import pygame
 
@@ -86,6 +88,8 @@ class InputHandler:
         # ── Mouse ────────────────────────────────────────────────────────────
         if et == pygame.MOUSEBUTTONDOWN:
             return ClickEvent(event.pos[0], event.pos[1])
+        if et == pygame.FINGERDOWN:
+            return ClickEvent(int(event.x * UI_HEIGHT), int(event.y * UI_WIDTH))
 
         # ── Buttons ───────────────────────────────────────────────────────────
         if et == pygame.JOYBUTTONDOWN:
