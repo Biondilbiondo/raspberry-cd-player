@@ -27,8 +27,6 @@ import time
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Optional, Union
-from .ui import WIDTH as UI_WIDTH
-from .ui import HEIGHT as UI_HEIGHT
 
 import pygame
 
@@ -85,11 +83,11 @@ class InputHandler:
         """
         et = event.type
 
-        # ── Mouse ────────────────────────────────────────────────────────────
+        # ── Mouse / touch ───────────────────────────────────────────────────
         if et == pygame.MOUSEBUTTONDOWN:
             return ClickEvent(event.pos[0], event.pos[1])
         if et == pygame.FINGERDOWN:
-            return ClickEvent(int(event.x * UI_HEIGHT), int(event.y * UI_WIDTH))
+            return self._touch_click(event.x, event.y)
 
         # ── Buttons ───────────────────────────────────────────────────────────
         if et == pygame.JOYBUTTONDOWN:
@@ -129,6 +127,30 @@ class InputHandler:
         return None
 
     # ── Private helpers ───────────────────────────────────────────────────────
+    def _touch_click(self, nx: float, ny: float) -> Optional[ClickEvent]:
+        """Convert normalized touch coords (0..1 over the whole window) to display
+        coordinates — the same space MOUSEBUTTONDOWN positions live in.
+
+        FINGERDOWN positions are normalised to the *window*, while mouse events in
+        SCALED mode arrive in logical (surface) coordinates with SDL's letterbox
+        transform already applied.  We undo that same scale/offset so both input
+        types land in one coordinate space before UI.to_canvas() maps them onto
+        the portrait canvas.
+        """
+        surf = pygame.display.get_surface()
+        if surf is None:
+            return None
+        sw, sh = surf.get_size()
+        ww, wh = pygame.display.get_window_size()
+        if min(sw, sh, ww, wh) <= 0:
+            return None
+        k  = min(ww / sw, wh / sh)   # SDL's scale factor (aspect preserved)
+        ox = (ww - sw * k) / 2.0     # letterbox offsets
+        oy = (wh - sh * k) / 2.0
+        x  = (nx * ww - ox) / k
+        y  = (ny * wh - oy) / k
+        return ClickEvent(int(x), int(y))
+
     def _resolve_btn0(self) -> InputEvent:
         held = 0.0
         if self._btn0_down_at is not None:
