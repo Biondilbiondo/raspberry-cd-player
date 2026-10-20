@@ -33,15 +33,17 @@ import sqlite3
 import time
 from datetime import datetime
 from typing import Dict, List, Optional
-import re 
+import re
 import subprocess
 import discid
 import musicbrainzngs
 import configparser
 
 import requests
+from mutagen.id3 import APIC, TIT2, TALB, TPE1, TDRC, TXXX, UFID
 
 log = logging.getLogger("metadata")
+logging.getLogger("musicbrainzngs").setLevel(logging.ERROR)
 
 config = configparser.ConfigParser()
 config.read('config.ini')
@@ -555,3 +557,137 @@ def fetch_album_metadata(self, artist: str, album: str,
 def _unknown(raw_tracks: List[Dict]) -> Dict:
     return {"artist": "Unknown Artist", "album": "Unknown CD",
             "year": "", "tracks": raw_tracks, "art_path": None}
+
+
+# ── File-based metadata extraction (vault playback) ───────────────────────
+def read_file_metadata(path: str) -> Optional[Dict]:
+    """Extract all useful metadata from a single audio file on disk.
+    
+    Works with both ID3-tagged files (MP3, MP4) and VorbisComment files (FLAC, OGG).
+    """
+    from mutagen import File as MutagenFile
+    from mutagen.flac import FLAC
+    from mutagen.mp4 import MP4
+    from mutagen.oggvorbis import OggVorbis
+    from mutagen.mp3 import MP3
+
+    audio = MutagenFile(path)
+    if audio is None or audio.tags is None:
+        return None
+
+    def _v(key: str) -> str:
+        """Get a VorbisComment key value (case-insensitive)."""
+        vals = audio.tags.get(key)
+        if vals:
+            return str(vals[0])
+        return ""
+
+    # Title
+    title = ""
+    if isinstance(audio, (MP3, MP4)):
+        for tag in audio.tags.values():
+            if isinstance(tag, TIT2):
+                title = str(tag.text[0]) if tag.text else ""
+                break
+    title = title or _v("TITLE") or _v("TiT2")
+    if not title:
+        title = os.path.basename(path)
+
+    # Artist
+    artist = ""
+    if isinstance(audio, (MP3, MP4)):
+        for tag in audio.tags.values():
+            if isinstance(tag, TPE1):
+                artist = str(tag.text[0]) if tag.text else ""
+                break
+    artist = artist or _v("ARTIST") or _v("TiAr")
+
+    # Album
+    album = ""
+    if isinstance(audio, (MP3, MP4)):
+        for tag in audio.tags.values():
+            if isinstance(tag, TALB):
+                album = str(tag.text[0]) if tag.text else ""
+                break
+    album = album or _v("ALBUM") or _v("TiAl")
+
+    # Year
+    year = ""
+    if isinstance(audio, (MP3, MP4)):
+        for tag in audio.tags.values():
+            if isinstance(tag, TDRC):
+                year = str(tag.text[0])[:4] if tag.text else ""
+                break
+    year = year or _v("DATE") or _v("TDRC") or _v("TiD")
+
+    # MusicBrainz ID
+    mbid = ""
+    mbid = (_v("MUSICBRAINZ_ALBUMID") or _v("MUSICBRAINZ_TRACKID") or
+            _v("MusicBrainz Album Id"))
+
+    # Duration
+    duration = audio.info.length if audio.info else 0.0
+    duration_fmt = f"{int(duration // 60):02d}:{int(duration % 60):02d}"
+
+    # Cover art — check both APIC (ID3) and PICTURE (FLAC VorbisComment)
+    art_bytes = None
+    if isinstance(audio, FLAC):
+        for pic in audio.pictures:
+            art_bytes = pic.data
+            break
+    else:
+        for tag in audio.tags.values():
+            if isinstance(tag, APIC):
+                art_bytes = tag.data
+                break
+
+    return {
+        "title":        title,
+        "artist":       artist,
+        "album":        album,
+        "year":         year,
+        "duration":     duration,
+        "duration_fmt": duration_fmt,
+        "mbid":         mbid,
+        "art_bytes":    art_bytes,
+    }
+
+
+def extract_cover_from_tracks(track_paths: List[str], cache_dir: Optional[str] = None) -> Optional[str]:
+    """Scan track files for embedded cover art; return a path to a cached copy or None."""
+    from mutagen import File as MutagenFile
+    from mutagen.flac import FLAC
+    from mutagen.mp3 import MP3
+    from mutagen.mp4 import MP4
+    from mutagen.oggvorbis import OggVorbis
+
+    if not track_paths:
+        return None
+
+    for path in track_paths:
+        audio = MutagenFile(path)
+        if audio is None or audio.tags is None:
+            continue
+
+        art_bytes = None
+        if isinstance(audio, FLAC):
+            for pic in audio.pictures:
+                art_bytes = pic.data
+                break
+        elif isinstance(audio, (MP3, MP4, OggVorbis)):
+            for tag in audio.tags.values():
+                if isinstance(tag, APIC):
+                    art_bytes = tag.data
+                    break
+
+        if art_bytes:
+            if cache_dir:
+                name = hashlib.md5(path.encode()).hexdigest() + ".jpg"
+                cache_path = os.path.join(cache_dir, name)
+                if not os.path.exists(cache_path):
+                    with open(cache_path, "wb") as f:
+                        f.write(art_bytes)
+                return cache_path
+            return None
+
+    return None

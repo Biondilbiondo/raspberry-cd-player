@@ -1,5 +1,6 @@
 import configparser
 import logging
+import os
 
 log = logging.getLogger("database")
 
@@ -21,7 +22,12 @@ def _parse_db_line(l):
     res['path'] = ' '.join(tok[3:])
     return res
 
+def _db_exists() -> bool:
+    return os.path.isfile(DATABASE_FILE)
+
 def db_get_track(vault_key, track):
+    if not _db_exists():
+        return None
     with open(DATABASE_FILE, 'r') as f:
         for l in f:
             item = _parse_db_line(l)
@@ -30,6 +36,8 @@ def db_get_track(vault_key, track):
     return None
 
 def db_is_cd_present(vault_key):
+    if not _db_exists():
+        return False
     with open(DATABASE_FILE, 'r') as f:
         for l in f:
             item = _parse_db_line(l)
@@ -38,16 +46,15 @@ def db_is_cd_present(vault_key):
     return False
 
 def db_is_cd_complete(vault_key):
-    ntracks = None
-    track_cnt = 0
+    if not _db_exists():
+        return False
+    """Return True if tracks 0..N-1 are all present (no gaps)."""
+    tracks = set()
     with open(DATABASE_FILE, 'r') as f:
         for l in f:
             item = _parse_db_line(l)
             if item['vault_key'] == vault_key:
-                track_cnt += 1
-                ntracks = item['ntracks']
-
-    if ntracks is not None and ntracks == track_cnt:
-        return True
-    
-    return False
+                tracks.add(item['track'])
+    if not tracks:
+        return False
+    return tracks == set(range(min(tracks), max(tracks) + 1))

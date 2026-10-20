@@ -34,7 +34,7 @@ import pygame
 
 from .player import Player
 from .ui import UI, CTRL_RADIUS, CTRL_Y, VISIBLE_TRACKS
-from .metadata_manager import fetch_cd_metadata, fetch_album_metadata
+from .metadata_manager import fetch_cd_metadata, fetch_album_metadata, read_file_metadata, extract_cover_from_tracks
 from .cd_handler import CDHandler
 from .input_handler import InputHandler, InputEvent, ClickEvent
 from .library_manager import LibraryManager
@@ -212,10 +212,13 @@ class MusicPlayer:
         if db_is_cd_present(self.vault_key):
             log.info("This CD is present in the database")
             if db_is_cd_complete(self.vault_key):
-                log.info("This CD is complete in the database")
-                # 1. Check if cache folder is present, if it is delete it.
-                # 2. Switch to cached playback
-                #self._start_library_playback(self.vault_key)
+                log.info("This CD is complete in the vault – playing from archive")
+                if self._start_vault_playback(self.vault_key, _disc_info['tracks']):
+                    return
+                # One or more files missing – fall through to live rip path
+                log.info("Vault files incomplete – falling back to live rip")
+            else:
+                log.info("CD partially ripped – resuming ripping")
 
         self._rip_dir = os.path.join(CACHE_DIR, self.vault_key)
         meta    = fetch_cd_metadata(_disc_info)
@@ -238,7 +241,75 @@ class MusicPlayer:
 
         self.source        = "cd-rip"
         self.current_track = 0
+        # Since it is still not in the vault, it should be started.
+        self._rip_async(0)
+        time.sleep(1)
         self._start_playback()
+
+    def _start_vault_playback(self, vault_key: str, fallback_tracks: list) -> bool:
+        """Load archived vault files and start playback without ripping.
+        
+        Returns True if all tracks are present and playable (vault mode).  
+        Returns False if any track is missing (caller should proceed with live rip).
+        """
+        ntracks = len(fallback_tracks)
+        track_files = [db_get_track(vault_key, i) for i in range(ntracks)]
+
+        # Check all files exist
+        for i, entry in enumerate(track_files):
+            if entry is None:
+                log.warning("Vault track %d missing, falling back to live rip", i)
+                return False
+            if not os.path.exists(entry['path']):
+                log.warning("Vault track %d file missing: %s", i, entry['path'])
+                return False
+
+        # Gather file paths and extract metadata
+        valid_tracks = []
+        all_paths = []
+        file_metas = []
+        for i, entry in enumerate(track_files):
+            meta = read_file_metadata(entry['path'])
+            if meta is None:
+                log.warning("Could not read metadata for %s", entry['path'])
+                return False
+            meta['num'] = entry['track'] + 1
+            meta['path'] = entry['path']
+            file_metas.append(meta)
+            valid_tracks.append(entry)
+            all_paths.append(entry['path'])
+
+        # Build album_info from first track's tags
+        first = file_metas[0]
+        self.album_info = {
+            "artist":   first.get("artist") or "Unknown Artist",
+            "album":    first.get("album") or "Unknown Album",
+            "year":     first.get("year", ""),
+            "mbid":     first.get("mbid", ""),
+            "art_path": extract_cover_from_tracks(all_paths, CACHE_DIR),
+        }
+
+        # Build tracklist with durations from disc TOC as fallback
+        self.tracklist = []
+        for i, fm in enumerate(file_metas):
+            disc_duration = 0.0
+            if i < len(fallback_tracks):
+                dd = float(fallback_tracks[i].get('duration', 0))
+                disc_duration = dd
+            self.tracklist.append({
+                "num":          fm['num'],
+                "title":        fm.get("title", f"Track {i + 1}"),
+                "path":         fm['path'],
+                "duration":     fm.get("duration_fmt", "00:00"),
+                "disc_duration": fm.get("duration_fmt", "00:00"),
+                "disc_duration_s": disc_duration,
+            })
+
+        self.source      = "vault"
+        self.current_track = 0
+        self._start_playback()
+        log.info("Vault playback started – %d tracks", len(self.tracklist))
+        return True
 
     def _reset_progress(self):
         """Clear cached progress state when switching to a new source/album."""
@@ -258,6 +329,15 @@ class MusicPlayer:
         idx = max(0, min(idx, len(self.tracklist) - 1))
         self.current_track = idx
         track = self.tracklist[idx]
+
+        # Vault playback — play archived files directly
+        if self.source == "vault":
+            self._playback_pos   = 0.0
+            self._playback_dur   = self.tracklist[idx].get('disc_duration_s', 0.0)
+            self.player.play(track['path'])
+            self.paused = False
+            log.info("Playing track %d from vault: %s", idx + 1, track.get("title"))
+            return
 
         dbtrack = db_get_track(self.vault_key, idx)
         if dbtrack is not None:
@@ -454,7 +534,14 @@ class MusicPlayer:
 
                 pos = self.player.get_position()
                 self._playback_pos = pos
-                current_rip_pos = _rip_estimated_len_s(_rip_wav_file(self._rip_dir, self.current_track))
+
+                if self.source == "vault":
+                    ripped_status = ["archived"] * len(self.tracklist)
+                    current_rip_pos = 0.0
+                else:
+                    ripped_status = self.get_rip_status()
+                    current_rip_pos = _rip_estimated_len_s(_rip_wav_file(self._rip_dir, self.current_track))
+
                 self.ui.draw_playback(
                     album_info    = self.album_info,
                     tracklist     = self.tracklist,
@@ -462,7 +549,7 @@ class MusicPlayer:
                     paused        = self.paused,
                     position      = self._playback_pos,
                     ripped_pos    = current_rip_pos,
-                    ripped_status = self.get_rip_status(),
+                    ripped_status = ripped_status,
                     duration      = self._playback_dur,
                 )
 
