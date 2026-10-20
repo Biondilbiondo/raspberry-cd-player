@@ -20,20 +20,30 @@ CD_VAULT = config.get('storage', 'vault_dir')
 CACHE_DIR = config.get('storage', 'cache_dir')
 VAULT_AUDIO_EXTS = {".flac", ".wav", ".mp3", ".ogg", ".m4a"}
 AUTOMATIC_RIPPING = True
+CONFIG_LOG_LEVEL = config.get('log', 'level', fallback="info")
+if CONFIG_LOG_LEVEL.lower() == 'debug':
+    _loglevel = logging.DEBUG
+elif CONFIG_LOG_LEVEL.lower() == 'warning':
+    _loglevel = logging.WARNING
+elif CONFIG_LOG_LEVEL.lower() == 'error':
+    _loglevel = logging.ERROR
+else:
+    _loglevel = logging.INFO
 
 import pygame
 
 from .player import Player
-from .ui import UI
+from .ui import UI, CTRL_RADIUS, CTRL_Y, VISIBLE_TRACKS
 from .metadata_manager import fetch_cd_metadata, fetch_album_metadata
 from .cd_handler import CDHandler
 from .input_handler import InputHandler, InputEvent, ClickEvent
 from .library_manager import LibraryManager
 from .cd_rip import _rip_chain, _rip_done_file, _rip_doing_file, _rip_wav_file, _rip_estimated_len_s
+from .database import db_is_cd_complete, db_is_cd_present, db_get_track
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
-    level=logging.INFO,
+    level=_loglevel,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)],
 )
@@ -72,8 +82,7 @@ class MusicPlayer:
         self.library_sel     = 0
 
         self._running        = True
-        self._last_play_time = 0
-        self._disc_id_str    = None   # stored so hot-reload can re-fetch
+        self.vault_key       = None
 
         # Progress bar state
         self._playback_pos   = 0.0
@@ -96,7 +105,8 @@ class MusicPlayer:
             self._rip_process = multiprocessing.Process(target=_rip_chain, 
                                                         args=(self._rip_dir, 
                                                               track, 
-                                                              len(self.tracklist), 
+                                                              len(self.tracklist),
+                                                              self.vault_key, 
                                                               self.album_info['mbid'],
                                                               self.album_info['art_path']))
             self._rip_process.start()
@@ -108,7 +118,9 @@ class MusicPlayer:
             return None
         status = []
         for track in range(len(self.tracklist)):
-            if os.path.exists(os.path.join(self._rip_dir, f"track{track+1:02d}.doing")):
+            if db_get_track(self.vault_key, track) is not None:
+                status += ['archived']
+            elif os.path.exists(os.path.join(self._rip_dir, f"track{track+1:02d}.doing")):
                 status += ['doing']
             elif os.path.exists(os.path.join(self._rip_dir, f"track{track+1:02d}.done")):
                 status += ['done']
@@ -119,17 +131,14 @@ class MusicPlayer:
     def _kill_rip(self):
         if not self.is_ripping or self._rip_process is None:
             return
+        import signal
         log.info("Trying to kill previous ripping process")
-        try:
-            self._rip_process.kill()
-            self._rip_process.join(timeout=5)
-        except Exception as e:
-            log.error("Error killing ripping process: %s", e)
-        
-        if self.is_ripping:
-            log.warning("Ripping process did not terminate in time")
-        else:
-            log.info("Process killed")
+        pid = self._rip_process.pid
+        os.killpg(pid, signal.SIGKILL)
+        while self.is_ripping:
+            log.info("Waiting killed ripping process")
+            time.sleep(1)
+        log.info("Process killed")
         
         for name in os.listdir(self._rip_dir):
             path = os.path.join(self._rip_dir, name)
@@ -199,9 +208,16 @@ class MusicPlayer:
         self._disc_id_str = _disc_info['cd-discid-str']
 
         # TODO Check if the disc is already in the DB.
-        vault_key = _disc_info["mb_id"]
+        self.vault_key = _disc_info["mb_id"]
+        if db_is_cd_present(self.vault_key):
+            log.info("This CD is present in the database")
+            if db_is_cd_complete(self.vault_key):
+                log.info("This CD is complete in the database")
+                # 1. Check if cache folder is present, if it is delete it.
+                # 2. Switch to cached playback
+                #self._start_library_playback(self.vault_key)
 
-        self._rip_dir = os.path.join(CACHE_DIR, vault_key)
+        self._rip_dir = os.path.join(CACHE_DIR, self.vault_key)
         meta    = fetch_cd_metadata(_disc_info)
 
         self.album_info = meta
@@ -224,24 +240,6 @@ class MusicPlayer:
         self.current_track = 0
         self._start_playback()
 
-    def _load_library_album(self, album):
-        self.ui.show_loading(f"Loading {album.get('title', '?')}…")
-        local_tracks = album.get("tracks", [])
-        meta = fetch_album_metadata(
-            album.get("artist", ""), album.get("title", ""), album.get("year")
-        )
-        # MusicBrainz tracks have no file paths — always use the local tracks
-        # which come from the library scanner and contain the actual file paths.
-        meta["tracks"] = local_tracks
-        # Local cover.jpg always wins — the user placed it intentionally.
-        # Fall back to MusicBrainz art only when no local file exists.
-        meta["art_path"] = album.get("art_path") or meta.get("art_path")
-        self.album_info    = meta
-        self.tracklist     = local_tracks
-        self.source        = "library"
-        self.current_track = 0
-        self._start_playback()
-
     def _reset_progress(self):
         """Clear cached progress state when switching to a new source/album."""
         self._playback_pos  = 0.0
@@ -255,14 +253,23 @@ class MusicPlayer:
         self._play_track(self.current_track)
 
     def _play_track(self, idx: int):
-        log.info(f"Start playing track {idx+1} while ripping")
-
         if not self.tracklist:
             return
         idx = max(0, min(idx, len(self.tracklist) - 1))
         self.current_track = idx
         track = self.tracklist[idx]
 
+        dbtrack = db_get_track(self.vault_key, idx)
+        if dbtrack is not None:
+            self._playback_pos   = 0.0
+            self._playback_dur   = self.tracklist[idx]['disc_duration_s']
+            self.player.play(dbtrack['path'])
+            self.paused = False
+            log.info("Playing track %d from database: %s", idx + 1, track.get("title"))
+            return 
+        
+        log.info(f"Start playing track {idx+1} while ripping")
+        
         if not os.path.exists(_rip_done_file(self._rip_dir, idx)):
             self.player.pause()
 
@@ -296,7 +303,6 @@ class MusicPlayer:
 
         uri = _rip_wav_file(self._rip_dir, idx)
 
-        self._last_play_time = time.monotonic()
         self._playback_pos   = 0.0
         self._playback_dur   = self.tracklist[idx]['disc_duration_s']
         self.player.play(uri)
@@ -327,9 +333,33 @@ class MusicPlayer:
                     self.player.stop()
                     self.state = self.prev_state or State.MAIN_MENU
                 else:
-                    idx = self.ui.get_playback_track_at(cx, cy, len(self.tracklist))
+                    # Compute tracklist Y to match draw_playback
+                    bar_y = CTRL_Y + CTRL_RADIUS + 15
+                    tl_y = bar_y + 30
+                    idx = self.ui.get_playback_track_at(cx, cy, len(self.tracklist), tl_y)
                     if idx is not None:
                         self._play_track(idx)
+                    else:
+                        control = self.ui.get_playback_control_at(cx, cy)
+                        if control == "prev":
+                            self._play_track(self.current_track - 1)
+                        elif control == "next":
+                            self._play_track(self.current_track + 1)
+                        elif control == "play_pause":
+                            self.paused = not self.paused
+                            if self.paused:
+                                self.player.pause()
+                            else:
+                                self.player.resume()
+                        elif control == "stop":
+                            self.player.stop()
+                        else:
+                            scroll = self.ui.get_scroll_button_at(cx, cy, CTRL_Y)
+                            if scroll == "up":
+                                self.ui._track_scroll = max(0, self.ui._track_scroll - 1)
+                            elif scroll == "down":
+                                max_scroll = max(0, len(self.tracklist) - VISIBLE_TRACKS)
+                                self.ui._track_scroll = min(max_scroll, self.ui._track_scroll + 1)
             return
 
         # ── Main menu ─────────────────────────────────────────────────────────

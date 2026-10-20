@@ -39,6 +39,7 @@ HEIGHT = 960
 # Colour palette
 C_BG        = (15,  15,  20)
 C_ACCENT    = (255, 165,  0)   # amber
+C_BLUE      = (0, 255-165, 255)
 C_TEXT      = (230, 230, 230)
 C_SUBTEXT   = (150, 150, 160)
 C_HIGHLIGHT = (40,  40,  55)
@@ -62,11 +63,23 @@ ART_Y    = 92
 ART_CACHE_MAX    = 8
 ART_RETRY_SECS   = 5.0    # retry a failed cover load after this long (art may arrive late)
 
-TRACK_LIST_Y   = 548
-VISIBLE_TRACKS = 8
+TRACK_LIST_Y   = 610
+VISIBLE_TRACKS = 6
+
+# Control button positions
+CTRL_Y      = 555                 # between title and progress bar
+CTRL_RADIUS = 30                  # button diameter 60
+CTRL_GAP    = 15                  # gap between button edges
+CTRL_STEP   = CTRL_RADIUS * 2 + CTRL_GAP   # center-to-center
 INDICATOR_X    = WIDTH - 70
 INDICATOR_R    = 10
 BACK_BUTTON_RECT = pygame.Rect(0, 0, 40, 40)
+
+# Scroll button positions (flanking the control bar)
+SCROLL_BTN_R    = 16          # radius for scroll buttons (32px diameter)
+SCROLL_BTN_Y    = CTRL_Y      # same row as control buttons
+SCROLL_BTN_UP_X = WIDTH - 30  # right side, scroll up
+SCROLL_BTN_DN_X = 30          # left side, scroll down
 
 
 def _pick_rotation() -> int:
@@ -135,7 +148,8 @@ class UI:
         self._loading_text = ""
         self._is_loading = False
 
-        self._track_scroll = 0
+        self._track_scroll  = 0
+        self._prev_track    = -1    # track index last time we auto-scrolled
 
     # -- Output ---------------------------------------------------------------
     def present(self):
@@ -154,21 +168,37 @@ class UI:
         pygame.display.flip()
 
     def to_canvas(self, pos: Tuple[int, int]) -> Tuple[int, int]:
-        """Map a mouse/touch position from the real display to canvas coordinates."""
-        x, y = pos
+        """Map a mouse/touch position from the real display to canvas coordinates.
+
+        On KMS/DRM with tslib, touch events arrive as absolute display coordinates.
+        We must reverse the display->frame transformation (scale+rotation) to get
+        the original portrait-canvas position.
+        """
+        dx, dy = pos
         fw, fh = self._frame_size
-        if not self._scaled:
-            x = (x - self._dest.x) * fw / self._dest.w
-            y = (y - self._dest.y) * fh / self._dest.h
-        x = max(0, min(fw - 1, int(x)))
-        y = max(0, min(fh - 1, int(y)))
+        dw, dh = self._display.get_size()
+
+        # ── 1. Map display → scaled-frame rect (undo letterboxing)
+        if self._scaled:
+            k = min(dw / fw, dh / fh)                      # scale factor
+            rw, rh = int(fw * k), int(fh * k)              # rendered size
+            ox, oy = (dw - rw) // 2, (dh - rh) // 2       # letterbox offset
+            if not (ox <= dx < ox + rw and oy <= dy < oy + rh):
+                return -1, -1                               # hit black bar
+            x = (dx - ox) / k
+            y = (dy - oy) / k
+        else:
+            x = (dx - self._dest.x) * fw / self._dest.w
+            y = (dy - self._dest.y) * fh / self._dest.h
+
+        # ── 2. Reverse the rotation to get portrait-canvas coords
         if self._rot == 90:
-            return WIDTH - 1 - y, x
+            return WIDTH - 1 - int(y), int(x)
         if self._rot == 270:
-            return y, HEIGHT - 1 - x
+            return int(y), HEIGHT - 1 - int(x)
         if self._rot == 180:
-            return WIDTH - 1 - x, HEIGHT - 1 - y
-        return x, y
+            return WIDTH - 1 - int(x), HEIGHT - 1 - int(y)
+        return int(x), int(y)
 
     # -- Fonts ----------------------------------------------------------------
     def _load_fonts(self):
@@ -366,13 +396,21 @@ class UI:
         self.screen.blit(art, ((WIDTH - ART_SIZE[0]) // 2, ART_Y))
 
         # Now playing
-        now_y = ART_Y + ART_SIZE[1] + 8
+        now_y = ART_Y + ART_SIZE[1] + 4
         if 0 <= current_track < len(tracklist):
             title = tracklist[current_track].get("title", f"Track {current_track + 1}")
             self._draw_text_centered(title, self.font_bold, now_y, C_ACCENT)
 
-        # Progress bar + position dot
-        bar_y = now_y + 30
+        # Control buttons + scroll arrows — centred between title and progress bar
+        max_scroll = max(0, len(tracklist) - VISIBLE_TRACKS)
+        self._scroll_up_enabled = self._track_scroll > 0
+        self._scroll_dn_enabled = self._track_scroll < max_scroll
+        self._draw_control_buttons(paused)
+        self._draw_scroll_button(SCROLL_BTN_UP_X, SCROLL_BTN_Y, "up")
+        self._draw_scroll_button(SCROLL_BTN_DN_X, SCROLL_BTN_Y, "down")
+
+        # Progress bar — below buttons
+        bar_y = CTRL_Y + CTRL_RADIUS + 15          # buttons bottom + gap
         bar_x = 20
         bar_w = WIDTH - 40
         bar_h = 8
@@ -394,17 +432,21 @@ class UI:
         pygame.draw.circle(self.screen, glow_col, (dot_cx, dot_cy), 8)
         pygame.draw.circle(self.screen, dot_color, (dot_cx, dot_cy), 5)
 
-        # Tracklist
-        tl_y = TRACK_LIST_Y
+        # Tracklist — shorter list starts below progress bar
+        tl_y = bar_y + 30
         pygame.draw.line(self.screen, C_ACCENT, (20, tl_y - 5), (WIDTH - 20, tl_y - 5), 1)
 
         max_scroll = max(0, len(tracklist) - VISIBLE_TRACKS)
-        self._track_scroll = max(0, min(self._track_scroll, max_scroll))   # e.g. after album change
-        if 0 <= current_track < len(tracklist):
+        self._track_scroll = max(0, min(self._track_scroll, max_scroll))   # clamp on album change
+
+        # Only auto-scroll when the current track reaches the last visible row
+        if current_track != self._prev_track and 0 <= current_track < len(tracklist):
             if current_track < self._track_scroll:
                 self._track_scroll = current_track
-            elif current_track >= self._track_scroll + VISIBLE_TRACKS:
-                self._track_scroll = current_track - VISIBLE_TRACKS + 1
+            elif current_track >= self._track_scroll + VISIBLE_TRACKS - 1:
+                self._track_scroll = min(current_track - VISIBLE_TRACKS + 2,
+                                         max(0, len(tracklist) - VISIBLE_TRACKS))
+            self._prev_track = current_track
 
         title_x = 40
         title_w = INDICATOR_X - INDICATOR_R - 6 - title_x      # keep clear of the status dot
@@ -430,7 +472,9 @@ class UI:
             self.screen.blit(title_s, (title_x, y + (row_h - title_s.get_height()) // 2))
 
             status = ripped_status[i] if ripped_status and i < len(ripped_status) else None
-            if status == "done":
+            if status == "archived":
+                indicator_col = C_BLUE
+            elif status == "done":
                 indicator_col = C_ACCENT
             elif status == "doing":
                 indicator_col = C_RIPPED
@@ -439,6 +483,86 @@ class UI:
             pygame.draw.circle(self.screen, indicator_col, (INDICATOR_X, y + row_h // 2), INDICATOR_R)
 
         self._draw_message_overlay()
+
+    def _draw_control_buttons(self, paused: bool):
+        """Draw play/pause, stop, next, and previous buttons centred in the UI."""
+        # Four buttons centred with equal spacing
+        first_x = (WIDTH - (CTRL_RADIUS * 2) * 4 - CTRL_GAP * 3) // 2 + CTRL_RADIUS
+        prev_x  = first_x
+        play_x  = first_x + CTRL_STEP
+        stop_x  = first_x + CTRL_STEP * 2
+        next_x  = first_x + CTRL_STEP * 3
+
+        for bx in (prev_x, play_x, stop_x, next_x):
+            pygame.draw.circle(self.screen, C_ACCENT, (bx, CTRL_Y), CTRL_RADIUS)
+            pygame.draw.circle(self.screen, C_ACCENT, (bx, CTRL_Y), CTRL_RADIUS, 2)
+
+        # ── Previous:  ◀◀|  (rewind)
+        pygame.draw.rect(self.screen, C_BG, (prev_x + 5, CTRL_Y - 14, 3, 28))
+        pygame.draw.polygon(self.screen, C_BG,
+                            [(prev_x + 8,  CTRL_Y - 14),
+                             (prev_x + 8,  CTRL_Y + 14),
+                             (prev_x - 14, CTRL_Y)])
+        pygame.draw.polygon(self.screen, C_BG,
+                            [(prev_x - 6,  CTRL_Y - 14),
+                             (prev_x - 6,  CTRL_Y + 14),
+                             (prev_x - 20, CTRL_Y)])
+
+        # ── Play / Pause
+        if paused:
+            # Pause: ❚❚  (two vertical bars)
+            pygame.draw.rect(self.screen, C_BG, (play_x - 14, CTRL_Y - 14, 6, 28))
+            pygame.draw.rect(self.screen, C_BG, (play_x - 1, CTRL_Y - 14, 6, 28))
+        else:
+            # Play: ▶  (right-pointing triangle)
+            pygame.draw.polygon(self.screen, C_BG,
+                                [(play_x - 10, CTRL_Y - 16),
+                                 (play_x - 10, CTRL_Y + 16),
+                                 (play_x + 14, CTRL_Y)])
+
+        # ── Stop:  ■  (filled square)
+        pygame.draw.rect(self.screen, C_BG, (stop_x - 12, CTRL_Y - 12, 24, 24))
+
+        # ── Next:  |▶▶  (fast-forward)
+        pygame.draw.rect(self.screen, C_BG, (next_x - 8, CTRL_Y - 14, 3, 28))
+        pygame.draw.polygon(self.screen, C_BG,
+                            [(next_x - 14, CTRL_Y - 14),
+                             (next_x - 14, CTRL_Y + 14),
+                             (next_x + 14, CTRL_Y)])
+        pygame.draw.polygon(self.screen, C_BG,
+                            [(next_x,      CTRL_Y - 14),
+                             (next_x,      CTRL_Y + 14),
+                             (next_x + 20, CTRL_Y)])
+
+    def _draw_scroll_button(self, cx: int, cy: int, direction: str):
+        """Draw a scroll ▲/▼ button in the track list header.
+        Grey when at the top/bottom, accent colour otherwise."""
+        enabled = (direction == "up" and self._scroll_up_enabled) or \
+                  (direction == "down" and self._scroll_dn_enabled)
+        col = C_ACCENT if enabled else C_SUBTEXT
+
+        pygame.draw.circle(self.screen, C_HIGHLIGHT, (cx, cy), SCROLL_BTN_R)
+
+        if direction == "up":
+            # ▲ arrow
+            pygame.draw.polygon(self.screen, col,
+                                [(cx, cy - 9),
+                                 (cx - 9, cy + 4),
+                                 (cx + 9, cy + 4)])
+        else:
+            # ▼ arrow
+            pygame.draw.polygon(self.screen, col,
+                                [(cx, cy + 9),
+                                 (cx - 9, cy - 4),
+                                 (cx + 9, cy - 4)])
+
+    def get_scroll_button_at(self, x: int, y: int, btn_y: int) -> Optional[str]:
+        """Return 'up' or 'down' if a scroll button was tapped."""
+        for name, bx in (("up", SCROLL_BTN_UP_X), ("down", SCROLL_BTN_DN_X)):
+            if (bx - SCROLL_BTN_R <= x <= bx + SCROLL_BTN_R and
+                btn_y - SCROLL_BTN_R <= y <= btn_y + SCROLL_BTN_R):
+                return name
+        return None
 
     # -- Hit Testing ----------------------------------------------------------
     def get_menu_item_at(self, x: int, y: int, items_count: int) -> Optional[int]:
@@ -463,10 +587,10 @@ class UI:
             y_cursor += item_h
         return None
 
-    def get_playback_track_at(self, x: int, y: int, tracklist_count: int) -> Optional[int]:
+    def get_playback_track_at(self, x: int, y: int, tracklist_count: int, bar_y: int = 0) -> Optional[int]:
         if tracklist_count == 0:
             return None
-        tl_y = TRACK_LIST_Y
+        tl_y = bar_y if bar_y else TRACK_LIST_Y
         row_h = (HEIGHT - tl_y) // VISIBLE_TRACKS
         for row in range(VISIBLE_TRACKS):
             i = self._track_scroll + row
@@ -475,6 +599,20 @@ class UI:
             y_row = tl_y + row * row_h
             if 0 <= x <= WIDTH and y_row <= y <= y_row + row_h:
                 return i
+        return None
+
+    def get_playback_control_at(self, x: int, y: int) -> Optional[str]:
+        """Detect which control button was pressed."""
+        first_x = (WIDTH - (CTRL_RADIUS * 2) * 4 - CTRL_GAP * 3) // 2 + CTRL_RADIUS
+        prev_x  = first_x
+        play_x  = first_x + CTRL_STEP
+        stop_x  = first_x + CTRL_STEP * 2
+        next_x  = first_x + CTRL_STEP * 3
+
+        for name, bx in (("prev", prev_x), ("play_pause", play_x), ("stop", stop_x), ("next", next_x)):
+            if (bx - CTRL_RADIUS <= x <= bx + CTRL_RADIUS and
+                CTRL_Y - CTRL_RADIUS <= y <= CTRL_Y + CTRL_RADIUS):
+                return name
         return None
 
 

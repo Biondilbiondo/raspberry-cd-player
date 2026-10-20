@@ -38,7 +38,8 @@ def _rip_estimated_len_s(file: str):
 
 def _rip_chain(dest_dir: str, 
                track: int, 
-               ntracks: int, 
+               ntracks: int,
+               vault_key: str,
                mbid: str, 
                art_path: str, 
                cdparanoia_timeout: int = 6000):
@@ -56,7 +57,7 @@ def _rip_chain(dest_dir: str,
 
     for i in range(ntracks):
         _encode_ripped_track(dest_dir, i)
-        tag_file(_rip_encoded_file(dest_dir, i), i+1, mbid, cover_path=art_path)
+        tag_file(_rip_encoded_file(dest_dir, i), i+1, vault_key, mbid, cover_path=art_path)
 
     log.info("CD archiviation completed!")
 

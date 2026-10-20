@@ -48,11 +48,8 @@ config.read('config.ini')
 
 CD_VAULT = config.get('storage', 'vault_dir')
 # ── Paths ─────────────────────────────────────────────────────────────────────
-_DATA_DIR      = config.get('storage', 'database_dir')
 CACHE_DIR      = config.get('storage', 'art_cache')
-CACHE_DB       = os.path.join(_DATA_DIR, "disc_cache.db")
 os.makedirs(CACHE_DIR, exist_ok=True)
-os.makedirs(_DATA_DIR, exist_ok=True)
 
 # ── API endpoints ─────────────────────────────────────────────────────────────
 MB_BASE      = "https://musicbrainz.org/ws/2"

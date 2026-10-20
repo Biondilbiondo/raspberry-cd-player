@@ -85,8 +85,10 @@ class InputHandler:
 
         # ── Mouse / touch ───────────────────────────────────────────────────
         if et == pygame.MOUSEBUTTONDOWN:
+            log.debug("MOUSEBUTTONDOWN pos=%s", event.pos)
             return ClickEvent(event.pos[0], event.pos[1])
         if et == pygame.FINGERDOWN:
+            log.debug("FINGERDOWN nx=%.2f ny=%.2f", event.x, event.y)
             return self._touch_click(event.x, event.y)
 
         # ── Buttons ───────────────────────────────────────────────────────────

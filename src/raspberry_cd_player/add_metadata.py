@@ -4,6 +4,7 @@ from mutagen.id3 import (APIC, ID3, TALB, TCMP, TDRC, TIT2, TPE1, TPE2, TPOS,
 import configparser
 import logging
 import os, shutil
+from .database import db_add_entry
 
 log = logging.getLogger("metadata tagger")
 
@@ -28,7 +29,7 @@ def get_release(mbid):
     return mb.get_release_by_id(mbid, includes=INCLUDES)["release"]
 
 
-def tag_file(path, track, mbid, disc=1, cover_path=None, move_path=True):
+def tag_file(path, track, vault_key, mbid, disc=1, cover_path=None, move_path=True):
     """Blindly tag `path` with track number `track` (on medium `disc`).
 
     release: dict from get_release()
@@ -96,3 +97,4 @@ def tag_file(path, track, mbid, disc=1, cover_path=None, move_path=True):
         dirname, _ = os.path.split(dest)
         os.makedirs(dirname, exist_ok=True)
         shutil.move(path, dest)
+        db_add_entry(vault_key, len(medium['track-list']), track-1, path)
