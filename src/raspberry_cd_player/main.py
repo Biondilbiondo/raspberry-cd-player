@@ -39,7 +39,7 @@ from .cd_handler import CDHandler
 from .input_handler import InputHandler, InputEvent, ClickEvent
 from .library_manager import LibraryManager
 from .cd_rip import _rip_chain, _rip_done_file, _rip_doing_file, _rip_wav_file, _rip_estimated_len_s
-from .database import db_is_cd_complete, db_is_cd_present, db_get_track
+from .database import db_is_cd_complete, db_is_cd_present, db_get_track, db_get_all_keys
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -407,7 +407,11 @@ class MusicPlayer:
                     idx = self.ui.get_library_album_at(cx, cy, len(self.library_albums), self.library_sel)
                     if idx is not None:
                         self.library_sel = idx
-                        self._load_library_album(self.library_albums[idx])
+                        album = self.library_albums[idx]
+                        if "vault_key" in album:
+                            self._play_vault(album["vault_key"])
+                        elif hasattr(self, "_load_library_album"):
+                            self._load_library_album(album)
             elif s == State.PLAYBACK:
                 if self.ui.is_back_button_at(cx, cy):
                     self.player.stop()
@@ -461,7 +465,11 @@ class MusicPlayer:
                 self.library_sel = min(len(self.library_albums) - 1, self.library_sel + 1)
             elif event == InputEvent.FIRE:
                 if self.library_albums:
-                    self._load_library_album(self.library_albums[self.library_sel])
+                    album = self.library_albums[self.library_sel]
+                    if "vault_key" in album:
+                        self._play_vault(album["vault_key"])
+                    elif hasattr(self, "_load_library_album"):
+                        self._load_library_album(album)
             elif event == InputEvent.BACK:
                 self.state = State.MAIN_MENU
 
@@ -485,6 +493,45 @@ class MusicPlayer:
                 self.player.stop()
                 self.state = self.prev_state or State.MAIN_MENU
 
+    def _load_vault_list(self) -> list:
+        """Build a list of archived CDs from the database with their metadata."""
+        cd_list = []
+        for vault_key in db_get_all_keys():
+            if not db_is_cd_complete(vault_key):
+                continue
+            # Count tracks
+            ntracks = 0
+            while db_get_track(vault_key, ntracks) is not None:
+                ntracks += 1
+            if ntracks == 0:
+                continue
+            # Read metadata from first available track
+            first = db_get_track(vault_key, 0)
+            if first is None or not os.path.exists(first['path']):
+                continue
+            meta = read_file_metadata(first['path'])
+            artist = meta.get("artist", "Unknown Artist") if meta else "Unknown Artist"
+            album  = meta.get("album", "Unknown Album") if meta else "Unknown Album"
+            year   = meta.get("year", "") if meta else ""
+            cd_list.append({
+                "vault_key": vault_key,
+                "artist": artist,
+                "title": album,
+                "year": year,
+                "ntracks": ntracks,
+                "art_path": None,
+            })
+        return cd_list
+
+    def _play_vault(self, vault_key: str):
+        """Start playback of a fully archived CD."""
+        ntracks = 0
+        while db_get_track(vault_key, ntracks) is not None:
+            ntracks += 1
+        if ntracks == 0:
+            return
+        self._start_vault_playback(vault_key, [{} for _ in range(ntracks)])
+
     def _main_menu_select(self):
         item = self.main_menu_items[self.main_menu_sel]
         if item == "Play CD":
@@ -493,7 +540,12 @@ class MusicPlayer:
             else:
                 self.ui.show_message("No CD detected", duration=2)
         elif item == "Library":
-            self.library_albums = self.library.get_albums()
+            library_albums = self.library.get_albums()
+            vault_cds = self._load_vault_list()
+            if vault_cds:
+                self.library_albums = vault_cds + library_albums
+            else:
+                self.library_albums = library_albums
             self.library_sel    = 0
             self.prev_state     = State.MAIN_MENU
             self.state          = State.LIBRARY_BROWSE

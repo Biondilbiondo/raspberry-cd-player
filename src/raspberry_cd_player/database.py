@@ -46,9 +46,9 @@ def db_is_cd_present(vault_key):
     return False
 
 def db_is_cd_complete(vault_key):
+    """Return True if tracks 0..N-1 are all present (no gaps)."""
     if not _db_exists():
         return False
-    """Return True if tracks 0..N-1 are all present (no gaps)."""
     tracks = set()
     with open(DATABASE_FILE, 'r') as f:
         for l in f:
@@ -58,3 +58,15 @@ def db_is_cd_complete(vault_key):
     if not tracks:
         return False
     return tracks == set(range(min(tracks), max(tracks) + 1))
+
+
+def db_get_all_keys() -> list:
+    """Return a list of all unique vault keys stored in the database."""
+    if not _db_exists():
+        return []
+    keys = set()
+    with open(DATABASE_FILE, 'r') as f:
+        for l in f:
+            item = _parse_db_line(l)
+            keys.add(item['vault_key'])
+    return sorted(keys)
