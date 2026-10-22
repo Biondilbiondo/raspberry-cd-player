@@ -1,16 +1,10 @@
 import os
 import shutil
 import subprocess
-import configparser
 import logging
-from .add_metadata import tag_file
 
-# Target drive speed (1x = 150 KB/s; 4x is quiet enough for audio)
-config = configparser.ConfigParser()
-config.read('config.ini')
-CD_SPEED =  int(config.get('cd', 'cd_speed'))
-FFMPEG_OPTIONS = config.get('ffmpeg', 'options')
-FFMPEG_OUT_FORMAT = config.get('ffmpeg', 'format')
+from .config import config
+from .add_metadata import tag_file
 
 log = logging.getLogger("cd rip")
 
@@ -24,7 +18,7 @@ def _rip_wav_file(dest_dir: str, track: int):
     return os.path.join(dest_dir, f"track{track+1:02d}.wav")
 
 def _rip_encoded_file(dest_dir: str, track: int):
-    return os.path.join(dest_dir, f"track{track+1:02d}.{FFMPEG_OUT_FORMAT}")
+    return os.path.join(dest_dir, f"track{track+1:02d}.{config.ffmpeg_format}")
 
 def _rip_estimated_len_s(file: str):
     """Return the estimated length in seconds of a wav file that
@@ -79,7 +73,9 @@ def _rip_track(dest_dir: str, track: int, cdparanoia_timeout: int = 6000):
                     print("Doing", file=f)
                 log.info("Calling cdparanoia")
                 r = subprocess.run(
-                    ["cdparanoia", "-Z", "-S", f"{CD_SPEED}", "-d", "/dev/sr0",
+                    ["cdparanoia", *config.cdparanoia_flags.split(),
+                        "-S", str(config.cd_speed),
+                        "-d", config.cd_device,
                         str(track + 1), wav_path],
                     timeout=cdparanoia_timeout,
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -111,7 +107,7 @@ def _encode_ripped_track(dest_dir, track):
     log.info(f"Encoding track {track+1}")
     mp3_path = _rip_encoded_file(dest_dir, track)
     subprocess.run(
-        ["ffmpeg", "-y", "-i", wav_path] + FFMPEG_OPTIONS.split() + [mp3_path],
+        ["ffmpeg", "-y", "-i", wav_path] + config.ffmpeg_options.split() + [mp3_path],
         timeout=120,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )

@@ -10,25 +10,12 @@ import multiprocessing
 import threading
 import logging
 import os
-import configparser
 from typing import Union
 
-config = configparser.ConfigParser()
-config.read('config.ini')
+from .config import config
 
-CD_VAULT = config.get('storage', 'vault_dir')
-CACHE_DIR = config.get('storage', 'cache_dir')
 VAULT_AUDIO_EXTS = {".flac", ".wav", ".mp3", ".ogg", ".m4a"}
 AUTOMATIC_RIPPING = True
-CONFIG_LOG_LEVEL = config.get('log', 'level', fallback="info")
-if CONFIG_LOG_LEVEL.lower() == 'debug':
-    _loglevel = logging.DEBUG
-elif CONFIG_LOG_LEVEL.lower() == 'warning':
-    _loglevel = logging.WARNING
-elif CONFIG_LOG_LEVEL.lower() == 'error':
-    _loglevel = logging.ERROR
-else:
-    _loglevel = logging.INFO
 
 import pygame
 
@@ -43,7 +30,7 @@ from .database import db_is_cd_complete, db_is_cd_present, db_get_track, db_get_
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
-    level=_loglevel,
+    level=config.log_level,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)],
 )
@@ -220,7 +207,7 @@ class MusicPlayer:
             else:
                 log.info("CD partially ripped – resuming ripping")
 
-        self._rip_dir = os.path.join(CACHE_DIR, self.vault_key)
+        self._rip_dir = os.path.join(config.cache_dir, self.vault_key)
         meta    = fetch_cd_metadata(_disc_info)
 
         self.album_info = meta
@@ -286,7 +273,7 @@ class MusicPlayer:
             "album":    first.get("album") or "Unknown Album",
             "year":     first.get("year", ""),
             "mbid":     first.get("mbid", ""),
-            "art_path": extract_cover_from_tracks(all_paths, CACHE_DIR),
+            "art_path": extract_cover_from_tracks(all_paths, config.cache_dir),
         }
 
         # Build tracklist with durations from disc TOC as fallback

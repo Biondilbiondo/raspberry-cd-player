@@ -3,17 +3,13 @@ import logging
 import threading
 from typing import Any
 
+from .config import config
+
 # libmpv requires the C numeric locale; must be set before importing mpv.
 locale.setlocale(locale.LC_NUMERIC, "C")
 import mpv  # noqa: E402
-import configparser
 
 log = logging.getLogger("player")
-config = configparser.ConfigParser()
-config.read('config.ini')
-
-CD_DEVICE_URI = config.get('cd', 'cd_device_uri')
-CD_OPEN_TIMEOUT = config.get('cd', 'cd_open_timeout')
 
 VOLUME_STEP = 5   # percent per button press
 VOLUME_MIN  = 0

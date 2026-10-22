@@ -4,24 +4,15 @@ from mutagen.id3 import (APIC, ID3, TALB, TCMP, TDRC, TIT2, TPE1, TPE2, TPOS,
 from mutagen.flac import FLAC, Picture as FlacPicture
 from mutagen.oggvorbis import OggVorbis
 from mutagen.mp4 import MP4
-import configparser
 import logging
 import os, shutil
+
+from .config import config
 from .database import db_add_entry
 
 log = logging.getLogger("metadata tagger")
 
-config = configparser.ConfigParser()
-config.read('config.ini')
-
-MB_AGENT = config.get('musicbrainz', 'agent') 
-MB_VERSION = config.get('musicbrainz', 'version')
-MB_MAIL = config.get('musicbrainz', 'mail')
-VAULT_FORMAT = config.get('storage', 'vault_format')
-CD_VAULT = config.get('storage', 'vault_dir')
-FFMPEG_OUT_FORMAT = config.get('ffmpeg', 'format')
-
-mb.set_useragent(MB_AGENT, MB_VERSION, MB_MAIL)
+mb.set_useragent(config.mb_agent, config.mb_version, config.mb_mail)
 
 INCLUDES = ["artists", "recordings", "artist-credits", "labels",
             "release-groups"]
@@ -72,13 +63,13 @@ def tag_file(path, track, vault_key, mbid, disc=1, cover_path=None, move_path=Tr
                  rec["id"], cover_path)
 
     if move_path:
-        dest = VAULT_FORMAT.format(track_title=rec['title'],
-                                   track_num=track,
-                                   artist=album_artist,
-                                   album=release['title'],
-                                   year=release['date'][:4])
-        dest = os.path.join(CD_VAULT, dest)
-        dest += f".{FFMPEG_OUT_FORMAT}"
+        dest = config.vault_format.format(track_title=rec['title'],
+                                          track_num=track,
+                                          artist=album_artist,
+                                          album=release['title'],
+                                          year=release.get('date', '')[:4])
+        dest = os.path.join(config.vault_dir, dest)
+        dest += f".{config.ffmpeg_format}"
 
         dirname, _ = os.path.split(dest)
         os.makedirs(dirname, exist_ok=True)

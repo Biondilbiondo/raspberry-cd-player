@@ -12,18 +12,14 @@ import logging
 import os
 import subprocess
 import discid
-import configparser
+
+from .config import config
 
 log = logging.getLogger("cd_handler")
 
 # CDROM IOCTL constants (linux/cdrom.h)
 CDROM_DRIVE_STATUS = 0x5326
 CDS_DISC_OK        = 4
-
-# Target drive speed (1x = 150 KB/s; 4x is quiet enough for audio)
-config = configparser.ConfigParser()
-config.read('config.ini')
-CD_SPEED =  int(config.get('cd', 'cd_speed'))
 
 class CDHandler:
     def __init__(self, device: str = discid.get_default_device()):
@@ -41,7 +37,9 @@ class CDHandler:
             log.debug("Disc status check failed: %s", e)
             return False
 
-    def set_speed(self, speed: int = CD_SPEED):
+    def set_speed(self, speed: int | None = None):
+        if speed is None:
+            speed = config.cd_speed
         try:
             subprocess.run(
                 ["/usr/bin/eject", "-x", str(speed), self.device],

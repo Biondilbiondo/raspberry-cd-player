@@ -37,20 +37,17 @@ import re
 import subprocess
 import discid
 import musicbrainzngs
-import configparser
 
 import requests
 from mutagen.id3 import APIC, TIT2, TALB, TPE1, TDRC, TXXX, UFID
 
+from .config import config
+
 log = logging.getLogger("metadata")
 logging.getLogger("musicbrainzngs").setLevel(logging.ERROR)
 
-config = configparser.ConfigParser()
-config.read('config.ini')
-
-CD_VAULT = config.get('storage', 'vault_dir')
 # ── Paths ─────────────────────────────────────────────────────────────────────
-CACHE_DIR      = config.get('storage', 'art_cache')
+CACHE_DIR = config.art_cache
 os.makedirs(CACHE_DIR, exist_ok=True)
 
 # ── API endpoints ─────────────────────────────────────────────────────────────
@@ -60,13 +57,10 @@ ITUNES_URL   = "https://itunes.apple.com/search"
 DEEZER_URL   = "https://api.deezer.com/search/album"
 DISCOGS_BASE = "https://api.discogs.com"
 
-MB_AGENT = config.get('musicbrainz', 'agent') 
-MB_VERSION = config.get('musicbrainz', 'version')
-MB_MAIL = config.get('musicbrainz', 'mail')
-musicbrainzngs.set_useragent(MB_AGENT, MB_VERSION, MB_MAIL)
+musicbrainzngs.set_useragent(config.mb_agent, config.mb_version, config.mb_mail)
 
 HEADERS = {
-    "User-Agent": f"{MB_AGENT}/{MB_VERSION} ({MB_MAIL})",
+    "User-Agent": f"{config.mb_agent}/{config.mb_version} ({config.mb_mail})",
     "Accept":      "application/json",
 }
 DISCOGS_TOKEN = os.environ.get("DISCOGS_TOKEN", "")

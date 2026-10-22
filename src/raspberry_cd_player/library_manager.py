@@ -32,22 +32,18 @@ import logging
 import os
 import re
 from typing import List, Dict, Optional
-import configparser
+
+from .config import config
 
 log = logging.getLogger("library")
 
-config = configparser.ConfigParser()
-config.read('config.ini')
-
-LIBRARY_ROOT = config.get('storage', 'library_dir')
-LIBRARY_JSON = os.path.join(LIBRARY_ROOT, "library.json")
+LIBRARY_JSON = os.path.join(config.library_dir, "library.json")
 
 AUDIO_EXTENSIONS = {".flac", ".wav", ".aiff", ".aif", ".alac", ".mp3", ".ogg", ".m4a"}
 
 
 class LibraryManager:
-    def __init__(self, root: str = LIBRARY_ROOT):
-        self.root = root
+    def __init__(self):
         self._albums: Optional[List[Dict]] = None
         self._json_mtime: float = 0
 
@@ -109,13 +105,14 @@ class LibraryManager:
 
     # ── Scanner ───────────────────────────────────────────────────────────────
     def _scan(self) -> List[Dict]:
-        """Walk LIBRARY_ROOT and build album list."""
+        """Walk the library directory and build album list."""
         albums = []
-        if not os.path.isdir(self.root):
-            log.warning("Library root not found: %s", self.root)
+        lib_root = config.library_dir
+        if not os.path.isdir(lib_root):
+            log.warning("Library root not found: %s", lib_root)
             return albums
 
-        for artist_dir in sorted(os.scandir(self.root), key=lambda e: e.name.lower()):
+        for artist_dir in sorted(os.scandir(lib_root), key=lambda e: e.name.lower()):
             if not artist_dir.is_dir() or artist_dir.name.startswith("."):
                 continue
             for album_dir in sorted(os.scandir(artist_dir.path), key=lambda e: e.name.lower()):
