@@ -8,7 +8,7 @@ import logging
 import os, shutil
 
 from .config import config
-from .database import db_add_entry
+from .database import db_update_track
 
 log = logging.getLogger("metadata tagger")
 
@@ -83,7 +83,8 @@ def tag_file(path, track, vault_key, mbid, disc=1, cover_path=None, move_path=Tr
         dirname, _ = os.path.split(dest)
         os.makedirs(dirname, exist_ok=True)
         shutil.move(path, dest)
-        db_add_entry(vault_key, len(medium['track-list']), track-1, dest)
+        ntracks = len(medium['track-list'])
+        db_update_track(vault_key, track-1, path=dest, state="done")
 
 
 # ── Tag writers per format ──────────────────────────────────────────────────

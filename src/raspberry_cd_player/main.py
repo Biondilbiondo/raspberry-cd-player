@@ -3,7 +3,6 @@
 main.py - Core state machine for the HiFiBerry Music Player
 """
 
-import re
 import sys
 import time
 import multiprocessing
@@ -25,8 +24,9 @@ from .metadata_manager import fetch_cd_metadata, fetch_album_metadata, read_file
 from .cd_handler import CDHandler
 from .input_handler import InputHandler, InputEvent, ClickEvent
 from .library_manager import LibraryManager
-from .cd_rip import _rip_chain, _rip_done_file, _rip_doing_file, _rip_wav_file, _rip_estimated_len_s
-from .database import db_is_cd_complete, db_is_cd_present, db_get_track, db_get_all_keys
+from .cd_rip import _rip_chain, _rip_estimated_len_s
+from .paths import wav_file_path, encoded_file_path
+from .database import db_is_cd_complete, db_is_cd_present, db_get_track, db_get_all_keys, db_get_rip_status, db_get_track_state, init_db, db_update_track, db_add_entry
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -76,7 +76,6 @@ class MusicPlayer:
         self._playback_dur   = 0.0
 
         self._rip_process    = None
-        self._rip_dir        = None
 
         self._cd_monitor = threading.Thread(target=self._monitor_cd, daemon=True)
         self._cd_monitor.start()
@@ -88,10 +87,10 @@ class MusicPlayer:
         return False
 
     def _rip_async(self, track):
+        """Start ripping in a background thread."""
         if not self.is_ripping:
             self._rip_process = multiprocessing.Process(target=_rip_chain, 
-                                                        args=(self._rip_dir, 
-                                                              track, 
+                                                        args=(track, 
                                                               len(self.tracklist),
                                                               self.vault_key, 
                                                               self.album_info['mbid'],
@@ -101,37 +100,58 @@ class MusicPlayer:
             log.error("Cannot start ripping, another ripping process is alive!")
 
     def get_rip_status(self):
-        if self._rip_dir is None:
-            return None
-        status = []
-        for track in range(len(self.tracklist)):
-            if db_get_track(self.vault_key, track) is not None:
-                status += ['archived']
-            elif os.path.exists(os.path.join(self._rip_dir, f"track{track+1:02d}.doing")):
-                status += ['doing']
-            elif os.path.exists(os.path.join(self._rip_dir, f"track{track+1:02d}.done")):
-                status += ['done']
-            else:
-                status += ['wait']
-        return status
+        """Return UI rip status list from database.
+        
+        Maps DB states to UI states:
+          done   → 'archived'   (fully archived to vault)
+          ripped → 'doing'      (WAV in cache, encoded/archived)
+          pending→ 'wait'       (not yet ripped)
+        """
+        ntracks = len(self.tracklist)
+        db_states = db_get_rip_status(self.vault_key, ntracks)
+        # Map: done→archived, ripping/ripped→doing, pending→wait
+        return ['archived' if s == 'done' else 'doing' if s in ('ripping', 'ripped') else 'wait' for s in db_states]
 
     def _kill_rip(self):
-        if not self.is_ripping or self._rip_process is None:
+        """Kill any active cdparanoia/ffmpeg subprocess."""
+        if not self.is_ripping:
             return
         import signal
-        log.info("Trying to kill previous ripping process")
+
+        log.info("Killing active rip subprocesses")
         pid = self._rip_process.pid
         os.killpg(pid, signal.SIGKILL)
         while self.is_ripping:
             log.info("Waiting killed ripping process")
             time.sleep(1)
-        log.info("Process killed")
-        
-        for name in os.listdir(self._rip_dir):
-            path = os.path.join(self._rip_dir, name)
-            if name.endswith(".doing") and os.path.isfile(path):
-                os.remove(path)
-                log.info(f"Deleted: {path}")
+
+        log.info("Rip subprocesses killed")
+
+        self._reset_rip_state()
+
+    def _reset_rip_state(self):
+        """Kill any rip process and reset the single ripping track.
+
+        Only one track can be in state 'ripping' at a time. Kill any running
+        rip process, reset that track to pending, and remove the partial WAV.
+        Other tracks are untouched.
+        """
+        if not self.vault_key:
+            return
+        self._kill_rip()
+        ntracks = len(self.tracklist)
+        for i in range(ntracks):
+            if db_get_track_state(self.vault_key, i) == "ripping":
+                wav = db_get_track(self.vault_key, i)['wav_path']
+                db_add_entry(self.vault_key, ntracks, i, "", state="pending", wav_path=wav)
+                try:
+                    os.remove(wav)
+                except OSError:
+                    pass
+                log.info("Track %d reset: ripping → pending, WAV removed", i)
+                break
+        else:
+            log.info("No track in ripping state to reset")
 
     def _monitor_cd(self):
         was_present = False
@@ -146,7 +166,8 @@ class MusicPlayer:
                     log.info("CD removed")
                     if self.state == State.PLAYBACK and self.source == "cd-rip":
                         self.player.stop()
-                        self.state = State.MAIN_MENU
+                        self._kill_rip()
+                    self.state = State.MAIN_MENU
                     was_present = False
                 # TODO Clean cache
             was_present = present
@@ -206,8 +227,23 @@ class MusicPlayer:
                 log.info("Vault files incomplete – falling back to live rip")
             else:
                 log.info("CD partially ripped – resuming ripping")
+        
+        _ntracks = len(_disc_info['tracks'])
 
-        self._rip_dir = os.path.join(config.cache_dir, self.vault_key)
+        for i in range(_ntracks):
+            wav = wav_file_path(self.vault_key, i)
+            enc = encoded_file_path(self.vault_key, i)
+            if db_get_track(self.vault_key, i) is None:
+                db_add_entry(self.vault_key, _ntracks, i, enc, state="pending", wav_path=wav)
+
+            elif db_get_track_state(self.vault_key, i) == "ripping":
+                db_update_track(self.vault_key, i, state="pending", wav_path=wav)
+                try:
+                    os.remove(wav)
+                    log.info("Track %d reset: ripping → pending, WAV removed", i)
+                except OSError:
+                    pass
+                
         meta    = fetch_cd_metadata(_disc_info)
 
         self.album_info = meta
@@ -326,32 +362,33 @@ class MusicPlayer:
             log.info("Playing track %d from vault: %s", idx + 1, track.get("title"))
             return
 
+        # Check vault DB — is this track already archived?
         dbtrack = db_get_track(self.vault_key, idx)
-        if dbtrack is not None:
+        if dbtrack is not None and dbtrack.get('state') == 'done':
             self._playback_pos   = 0.0
             self._playback_dur   = self.tracklist[idx]['disc_duration_s']
             self.player.play(dbtrack['path'])
             self.paused = False
-            log.info("Playing track %d from database: %s", idx + 1, track.get("title"))
-            return 
+            log.info("Playing track %d from vault: %s", idx + 1, track.get("title"))
+            return
+
+        # Track is being ripped/encoded — play from cache WAV
+        # Kill any existing rip process and reset state for a fresh start.
+        log.info("Playing track %d from cache (ripping in background)", idx + 1)
         
-        log.info(f"Start playing track {idx+1} while ripping")
-        
-        if not os.path.exists(_rip_done_file(self._rip_dir, idx)):
-            self.player.pause()
+        path = db_get_track(self.vault_key, idx)['wav_path']
+        _rip_status = db_get_rip_status(self.vault_key, len(self.tracklist))[idx]
+        if _rip_status == 'pending':
+            self._kill_rip()
+            self._reset_rip_state()
+            self._rip_async(idx)
 
-            if self.is_ripping and not os.path.exists(_rip_doing_file(self._rip_dir, idx)):
-                # If ripping is not started, start ripping it now!
-                self._kill_rip()
-            if not self.is_ripping:
-                self._rip_async(idx)
-
-            path = _rip_wav_file(self._rip_dir, idx)
-
-            # Wait for the file to be long enough to be played
+        if _rip_status in ('pending', 'ripping'): # Maybe the DB is not yet updated
+            # Wait for WAV to be ready (cdparanoia writes incrementally)
             LEAD = 5
             TIMEOUT = 30
             deadline = time.time() + TIMEOUT
+            log.debug("Waiting for the wav file")
             while time.time() < deadline:
                 try:
                     if _rip_estimated_len_s(path) >= LEAD:
@@ -362,17 +399,15 @@ class MusicPlayer:
                     pass
                 time.sleep(0.1)
 
-            if time.time() >= deadline:
-                log.error(f"Waited the start of the rip for {TIMEOUT} s, but didn't started.")
-                raise FileNotFoundError(f"File {path} not ready for the player.")
-            else:
-                log.info(f"Ready to play {path} while ripper runs")
-
-        uri = _rip_wav_file(self._rip_dir, idx)
+                if time.time() >= deadline:
+                    log.error("Waited %ds for rip to start, giving up", TIMEOUT)
+                    self.state = State.MAIN_MENU
+                    return
+            log.info("Ready to play %s while ripper runs", path)
 
         self._playback_pos   = 0.0
         self._playback_dur   = self.tracklist[idx]['disc_duration_s']
-        self.player.play(uri)
+        self.player.play(path)
         self.paused = False
         log.info("Playing track %d: %s", idx + 1, track.get("title"))
 
@@ -579,7 +614,7 @@ class MusicPlayer:
                     current_rip_pos = 0.0
                 else:
                     ripped_status = self.get_rip_status()
-                    current_rip_pos = _rip_estimated_len_s(_rip_wav_file(self._rip_dir, self.current_track))
+                    current_rip_pos = _rip_estimated_len_s(db_get_track(self.vault_key, self.current_track)['wav_path'])
 
                 self.ui.draw_playback(
                     album_info    = self.album_info,
@@ -602,5 +637,6 @@ class MusicPlayer:
         log.info("Goodbye.")
 
 def main():
+    init_db()
     app = MusicPlayer()
     app.run()
