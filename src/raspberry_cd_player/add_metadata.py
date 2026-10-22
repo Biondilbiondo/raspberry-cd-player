@@ -14,6 +14,11 @@ log = logging.getLogger("metadata tagger")
 
 mb.set_useragent(config.mb_agent, config.mb_version, config.mb_mail)
 
+
+def _sanitize_name(name: str) -> str:
+    """Replace characters illegal in filenames with a safe fallback."""
+    return name.replace("/", "–").replace("\\", "_").replace(":", "-").strip()
+
 INCLUDES = ["artists", "recordings", "artist-credits", "labels",
             "release-groups"]
 
@@ -63,11 +68,15 @@ def tag_file(path, track, vault_key, mbid, disc=1, cover_path=None, move_path=Tr
                  rec["id"], cover_path)
 
     if move_path:
-        dest = config.vault_format.format(track_title=rec['title'],
+        safe_title = _sanitize_name(rec['title'])
+        safe_artist = _sanitize_name(album_artist)
+        safe_album = _sanitize_name(release['title'])
+        year = release.get('date', '')[:4]
+        dest = config.vault_format.format(track_title=safe_title,
                                           track_num=track,
-                                          artist=album_artist,
-                                          album=release['title'],
-                                          year=release.get('date', '')[:4])
+                                          artist=safe_artist,
+                                          album=safe_album,
+                                          year=year)
         dest = os.path.join(config.vault_dir, dest)
         dest += f".{config.ffmpeg_format}"
 
