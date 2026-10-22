@@ -64,7 +64,7 @@ class Player:
         log.info("Play: %s", uri)
         if uri.startswith("cdda://"):
             log.error("Playing directly from cdda is no longer supported!")
-            raise NotImplemented("Cannot play directly from cdda://")
+            raise NotImplementedError("Cannot play directly from cdda://")
         else:
             with self._lock:
                 self._cd_loaded = False

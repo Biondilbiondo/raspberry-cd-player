@@ -81,7 +81,7 @@ class CDHandler:
         
         except Exception as e:
             log.error("cd-discid failed: %s", e)
-            return None, []
+            return None
 
     # ── Data disc (MP3 CD) support ────────────────────────────────────────────
     def is_data_disc(self) -> bool:

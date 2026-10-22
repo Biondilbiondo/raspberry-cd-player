@@ -144,7 +144,7 @@ class MusicPlayer:
             elif not present and was_present:
                 if self.state != State.CD_LOADING:
                     log.info("CD removed")
-                    if self.state == State.PLAYBACK and self.source in ("cd-rip"):
+                    if self.state == State.PLAYBACK and self.source == "cd-rip":
                         self.player.stop()
                         self.state = State.MAIN_MENU
                     was_present = False

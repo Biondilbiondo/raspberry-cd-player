@@ -31,6 +31,7 @@ import logging
 import os
 import sqlite3
 import time
+import uuid
 from datetime import datetime
 from typing import Dict, List, Optional
 import re
@@ -460,7 +461,7 @@ def fetch_cd_metadata(disc_info: dict = None,
     if disc_info is None:
         disc_info = CDHandler(device=device).get_disc_info()
         if disc_info is None:
-            return self._unknown([])
+            return _unknown(raw_tracks)
 
     cddb_id    = disc_info["freedb_id"]
     mb_disc_id = disc_info["mb_id"]
@@ -470,10 +471,14 @@ def fetch_cd_metadata(disc_info: dict = None,
     num_tracks = len(raw_tracks)
 
     # 2. From disc text
-    out = subprocess.run(
-        ["cd-info", "--no-device-info", "--no-cddb", device],
-        capture_output=True, text=True, check=True,
-    ).stdout
+    try:
+        out = subprocess.run(
+            ["cd-info", "--no-device-info", "--no-cddb", device],
+            capture_output=True, text=True, check=True,
+        ).stdout
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        log.warning("cd-info failed: %s — skipping CD-TEXT lookup", e)
+        out = ""
 
     disc, tracks, current = {}, {}, None
     for line in out.splitlines():
@@ -536,7 +541,7 @@ def fetch_cd_metadata(disc_info: dict = None,
 
     return meta
 
-def fetch_album_metadata(self, artist: str, album: str,
+def fetch_album_metadata(artist: str, album: str,
                             year: Optional[str] = None) -> Dict:
     """Fetch metadata for a library album."""
     result = _fetch_from_discogs(artist, album)
@@ -550,7 +555,8 @@ def fetch_album_metadata(self, artist: str, album: str,
 
 def _unknown(raw_tracks: List[Dict]) -> Dict:
     return {"artist": "Unknown Artist", "album": "Unknown CD",
-            "year": "", "tracks": raw_tracks, "art_path": None}
+            "year": "", "tracks": raw_tracks, "art_path": None,
+            "mbid": str(uuid.uuid4())}
 
 
 # ── File-based metadata extraction (vault playback) ───────────────────────
