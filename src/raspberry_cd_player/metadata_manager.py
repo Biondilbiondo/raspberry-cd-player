@@ -3,16 +3,25 @@
 metadata_manager.py — Fetch album metadata and artwork.
 
 Lookup order for a physical CD:
-  0. disc_overrides.json  (manual corrections — highest priority)
-  1. SQLite cache         (instant on re-insert)
-  2. MusicBrainz disc-ID lookup  → artist / album / year / tracks
-  3. iTunes Search API           → art + second opinion on artist/album
-  4. Deezer API                  → art fallback
-  5. Unknown fallback
+  0. disc_overrides.json           (manual corrections — highest priority)
+  1. SQLite cache                  (instant on re-insert)
+  2. MusicBrainz CD-TEXT lookup    (if CD has CD-TEXT data)
+  3. MusicBrainz disc-ID lookup    → artist / album / year / tracks
+  4. iTunes Search API             → art + second opinion on artist/album
+  5. MusicBrainz barcode/MCN lookup (last online resort)
+  6. Deezer API                    → art fallback
+  7. cd-info fallback              (CD-TEXT artist/album/track titles)
+  8. Unknown fallback
 
 Consensus rule: if MusicBrainz returns a result and iTunes independently
 finds the same artist (fuzzy match), the result is treated as confirmed.
 If only one source returns a result it is used as-is.
+
+When no online metadata can be found, cd-info is used as a last resort:
+- If the disc has CD-TEXT, the performer, album title, and track titles
+  from CD-TEXT are used (artist = "Unknown Artist" if missing, etc.)
+- If the disc has an MCN (Media Catalog Number/Barcode), it is tried as
+  a final online lookup before falling back to cd-info data.
 
 To correct a wrong album, edit /opt/musicplayer/disc_overrides.json:
   {
@@ -31,7 +40,6 @@ import logging
 import os
 import sqlite3
 import time
-import uuid
 from datetime import datetime
 from typing import Dict, List, Optional
 import re
@@ -455,31 +463,19 @@ def _fetch_from_discogs(artist: str, album: str) -> Optional[Dict]:
 
 
 
-def fetch_cd_metadata(disc_info: dict = None, 
-                      device: str = discid.get_default_device()) -> Dict:
-
-    if disc_info is None:
-        disc_info = CDHandler(device=device).get_disc_info()
-        if disc_info is None:
-            return _unknown(raw_tracks)
-
-    cddb_id    = disc_info["freedb_id"]
-    mb_disc_id = disc_info["mb_id"]
-    offsets    = disc_info["offsets"]
-    total_secs = disc_info["total_seconds"]
-    raw_tracks = disc_info["tracks"]
-    num_tracks = len(raw_tracks)
-
-    # 2. From disc text
-    try:
-        out = subprocess.run(
-            ["cd-info", "--no-device-info", "--no-cddb", device],
-            capture_output=True, text=True, check=True,
-        ).stdout
-    except (subprocess.CalledProcessError, FileNotFoundError) as e:
-        log.warning("cd-info failed: %s — skipping CD-TEXT lookup", e)
-        out = ""
-
+def _parse_cd_info_output(out: str) -> Dict:
+    """Parse cd-info output to extract MCN, CD-TEXT disc data, and CD-TEXT track data."""
+    result = {"mcn": "", "disc": {}, "tracks": {}}
+    
+    # Extract MCN
+    for line in out.splitlines():
+        if (m := re.match(r"Media Catalog Number \(MCN\):\s*(.*)", line)):
+            val = m.group(1).strip()
+            if val.lower() != "not available":
+                result["mcn"] = val
+            break
+    
+    # Extract CD-TEXT data
     disc, tracks, current = {}, {}, None
     for line in out.splitlines():
         if re.match(r"\s*CD-TEXT for Disc", line):
@@ -488,10 +484,142 @@ def fetch_cd_metadata(disc_info: dict = None,
             current = tracks.setdefault(int(m.group(1)), {})
         elif current is not None and (m := re.match(r"\s+([A-Z_]+):\s*(.*)", line)):
             current[m.group(1).lower()] = m.group(2).strip()
+    
+    result["disc"] = disc
+    result["tracks"] = tracks
+    return result
 
-    mb = _fetch_from_mb_by_metadata(artist=disc.get("performer"),
-                                    album=disc.get("title"),
-                                    raw_tracks=[tracks[n].get("title", "") for n in sorted(tracks)])
+
+def _fetch_from_mcn(mcn: str, raw_tracks: List[Dict],
+                    num_tracks: int) -> Optional[Dict]:
+    """Look up a CD by its Media Catalog Number (MCN/Barcode) via MusicBrainz."""
+    if not mcn:
+        return None
+    log.info("MB MCN lookup: %s", mcn)
+    try:
+        data = musicbrainzngs.get_releases_by_barcode(mcn, inc=["recordings", "artists",
+                                                                  "artist-credits", "release-groups"])
+    except musicbrainzngs.WebServiceError as exc:
+        log.warning("MB barcode lookup failed: %s", exc)
+        return None
+    except Exception as exc:
+        log.warning("MB barcode lookup error: %s", exc)
+        return None
+
+    releases = data.get("release-list", [])
+    if not releases:
+        return None
+
+    best = _mb_pick_release(releases)
+    mbid = best.get("id", "")
+
+    # Fetch full details
+    if mbid and not best.get("medium-list"):
+        try:
+            best = musicbrainzngs.get_release_by_id(mbid, inc=["recordings", "artists",
+                                                                "artist-credits", "release-groups"])["release"]
+        except musicbrainzngs.WebServiceError as exc:
+            log.warning("MB release fetch failed: %s", exc)
+
+    artist = _mb_extract_artist(best)
+    album = best.get("title", "")
+    year = (best.get("date") or "")[:4]
+    tracks = _mb_extract_tracks(best)
+
+    if not artist or not album:
+        return None
+
+    log.info("MB MCN found: %s – %s (%s)", artist, album, year)
+    return {"artist": artist, "album": album, "year": year,
+            "tracks": tracks or raw_tracks, "mbid": mbid}
+
+
+def _fallback_from_cdinfo(cd_info: Dict, raw_tracks: List[Dict]) -> Dict:
+    """Build the best possible metadata from cd-info data when online lookups fail.
+    
+    Priority:
+      1. CD-TEXT disc info (performer, title)
+      2. CD-TEXT track titles
+    """
+    disc_text = cd_info.get("disc", {})
+    track_text = cd_info.get("tracks", {})
+    
+    # Try CD-TEXT for artist/album
+    artist = disc_text.get("performer", "").strip() or ""
+    album  = disc_text.get("title", "").strip() or ""
+    
+    if artist:
+        log.info("Using CD-TEXT artist: %s", artist)
+    if album:
+        log.info("Using CD-TEXT album: %s", album)
+    
+    # Build track list: prefer CD-TEXT titles, fall back to raw ("Track 01")
+    tracks = []
+    for rt in raw_tracks:
+        num = rt["num"]
+        # Try CD-TEXT title first
+        tx = track_text.get(num, {})
+        title = tx.get("title", "").strip() or rt.get("title", f"Track {num:02d}")
+        tracks.append({
+            "num":      num,
+            "title":    title,
+            "duration": rt.get("duration", 0),
+        })
+    
+    # Build track_titles dict for tagging
+    track_titles = {t["num"]: t["title"] for t in tracks}
+    total_tracks = len(tracks)
+    
+    return {
+        "artist":       artist or "Unknown Artist",
+        "album":        album or "Unknown CD",
+        "year":         "",
+        "tracks":       tracks,
+        "track_titles": track_titles,  # For local tagging
+        "total_tracks": total_tracks,  # For local tagging
+        "mbid":         "",
+        "art_path":     None,
+        "untagged":     True,
+        "_cdtext":      {"has_cdtext": bool(disc_text or track_text),
+                         "mcn": cd_info.get("mcn", "")},
+    }
+
+
+def fetch_cd_metadata(disc_info: dict = None, 
+                      device: str = discid.get_default_device()) -> Dict:
+
+    if disc_info is None:
+        disc_info = CDHandler(device=device).get_disc_info()
+        if disc_info is None:
+            return _unknown(disc_info)
+
+    cddb_id    = disc_info["freedb_id"]
+    mb_disc_id = disc_info["mb_id"]
+    offsets    = disc_info["offsets"]
+    total_secs = disc_info["total_seconds"]
+    raw_tracks = disc_info["tracks"]
+    num_tracks = len(raw_tracks)
+
+    # Parse cd-info output: CD-TEXT + MCN + analysis
+    try:
+        out = subprocess.run(
+            ["cd-info", "--no-device-info", "--no-cddb", device],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        cd_info = _parse_cd_info_output(out)
+        log.debug("cd-info parsed: MCN=%s, disc_text=%s, track_text=%d tracks",
+                  cd_info["mcn"] or "(none)",
+                  bool(cd_info["disc"]),
+                  len(cd_info["tracks"]))
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        log.warning("cd-info failed: %s", e)
+        cd_info = {"mcn": "", "disc": {}, "tracks": {}}
+
+    # 2. CD-TEXT + MusicBrainz search
+    mb = _fetch_from_mb_by_metadata(artist=cd_info["disc"].get("performer"),
+                                    album=cd_info["disc"].get("title"),
+                                    raw_tracks=[cd_info["tracks"].get(n, {}).get("title", "") 
+                                                for n in sorted(cd_info["tracks"])])
     if mb:
         log.info("MB Found from CD-TEXT + MusicBrainz")
 
@@ -519,24 +647,38 @@ def fetch_cd_metadata(disc_info: dict = None,
             log.info("MB says '%s', iTunes says '%s' — using MB", artist,
                         itunes.get("itunes_artist", "?"))
 
-    if not mb:
-        log.info("No metadata found for disc %s", cddb_id)
-        return _unknown(raw_tracks)
+    # 5. Last resort: MCN-based lookup
+    if not mb and cd_info.get("mcn"):
+        mb = _fetch_from_mcn(cd_info["mcn"], raw_tracks, num_tracks)
+        if mb:
+            log.info("MB Found from MCN/Barcode lookup")
+            artist = mb["artist"]
+            album  = mb["album"]
 
-    # 5. Art: iTunes → Deezer → MusicBrainz CAA
+    # 6. Final fallback: use cd-info data
+    if not mb:
+        log.info("No online metadata found for disc %s — using cd-info as fallback", cddb_id)
+        return _fallback_from_cdinfo(cd_info, raw_tracks)
+
+    # 7. Art: iTunes → Deezer → MusicBrainz CAA
     art_path = (
         (itunes or {}).get("art_path")
         or _fetch_art_deezer(artist, album, cddb_id)
         or _fetch_art_caa(mb.get("mbid", ""), cddb_id)
     )
 
+    # Build track_titles from CD-TEXT (if available) for tagging
+    track_titles = cd_info.get("tracks", {})
+    track_titles_dict = {n: t.get("title", "") for n, t in track_titles.items() if t.get("title")}
+    
     meta = {
-        "artist":   mb["artist"],
-        "album":    mb["album"],
-        "year":     mb["year"],
-        "tracks":   mb["tracks"],
-        "mbid":     mb["mbid"],
-        "art_path": art_path,
+        "artist":       mb["artist"],
+        "album":        mb["album"],
+        "year":         mb["year"],
+        "tracks":       mb["tracks"],
+        "track_titles": track_titles_dict,  # For local tagging fallback
+        "mbid":         mb["mbid"],
+        "art_path":     art_path,
     }
 
     return meta
@@ -553,10 +695,19 @@ def fetch_album_metadata(artist: str, album: str,
     return {"artist": artist, "album": album, "year": year or "",
             "tracks": [], "art_path": art_path}
 
-def _unknown(raw_tracks: List[Dict]) -> Dict:
+def _unknown(raw_tracks: Optional[List[Dict]] = None) -> Dict:
+    """Fallback for when disc reading completely fails.
+    
+    Called only when cd-discid/discid fails to read the disc at all.
+    """
+    if raw_tracks is None:
+        raw_tracks = []
+    # Untagged fallback: no MusicBrainz release could be identified, so there is no
+    # mbid to tag against. Use an empty string and flag the entry as untagged; the ripper
+    # then archives the CD under untagged_CD/<DISCID>/ without attempting tagging.
     return {"artist": "Unknown Artist", "album": "Unknown CD",
             "year": "", "tracks": raw_tracks, "art_path": None,
-            "mbid": str(uuid.uuid4())}
+            "mbid": "", "untagged": True}
 
 
 # ── File-based metadata extraction (vault playback) ───────────────────────
@@ -571,7 +722,12 @@ def read_file_metadata(path: str) -> Optional[Dict]:
     from mutagen.oggvorbis import OggVorbis
     from mutagen.mp3 import MP3
 
-    audio = MutagenFile(path)
+    try:
+        audio = MutagenFile(path)
+    except Exception:  # noqa: BLE001
+        # Unreadable / missing / unsupported file -> treat as "no metadata"
+        log.debug("read_file_metadata: could not open %s", path)
+        return None
     if audio is None or audio.tags is None:
         return None
 

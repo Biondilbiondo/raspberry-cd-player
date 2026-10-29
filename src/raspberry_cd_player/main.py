@@ -93,8 +93,10 @@ class MusicPlayer:
                                                         args=(track, 
                                                               len(self.tracklist),
                                                               self.vault_key, 
-                                                              self.album_info['mbid'],
-                                                              self.album_info['art_path']))
+                                                              self.album_info.get('mbid') or "",
+                                                              self.album_info.get('art_path'),
+                                                              (self.album_info if self.album_info.get('mbid') == "" else None),
+                                                              ))
             self._rip_process.start()
         else:
             log.error("Cannot start ripping, another ripping process is alive!")
@@ -635,7 +637,29 @@ class MusicPlayer:
         pygame.quit()
         log.info("Goodbye.")
 
+def _start_web_editor():
+    """Start the Flask web metadata editor on 0.0.0.0:8080 (LAN-only).
+
+    Runs in a daemon thread started from the same process as the player, so the
+    web editor comes up at the same time as the player app.
+    """
+    try:
+        from . import meta_editor
+
+        t = threading.Thread(
+            target=meta_editor.app.run,
+            kwargs={"host": "0.0.0.0", "port": 8080, "debug": False, "use_reloader": False},
+            daemon=True,
+            name="meta-editor",
+        )
+        t.start()
+        log.info("Web metadata editor starting on http://0.0.0.0:8080")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Web metadata editor failed to start: %s", exc)
+
+
 def main():
     init_db()
+    _start_web_editor()
     app = MusicPlayer()
     app.run()

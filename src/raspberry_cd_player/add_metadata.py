@@ -28,8 +28,145 @@ def get_release(mbid):
     return mb.get_release_by_id(mbid, includes=INCLUDES)["release"]
 
 
-def tag_file(path, track, vault_key, mbid, disc=1, cover_path=None, move_path=True):
-    """Tag `path` with MusicBrainz metadata, using the correct format for the file type."""
+def write_tags(path: str, artist: str, album_artist: str, album: str, title: str,
+               year: str, track: int, total_tracks: int, mbid: str = "",
+               cover_bytes: bytes = None) -> bool:
+    """Write tags from editor-provided metadata onto an audio file (web editor).
+
+    Format-aware: FLAC (Vorbis comments + picture), MP3 (ID3 + APIC),
+    MP4/M4A (iTunes atoms + freeform MB ids + covr), OGG (Vorbis comments).
+    Used when fixing metadata of existing (possibly untagged) archives.
+    """
+    from mutagen import File as MutagenFile
+    from mutagen.flac import FLAC, Picture as FlacPicture
+    from mutagen.mp4 import MP4, MP4Cover
+    from mutagen.oggvorbis import OggVorbis
+    from mutagen.id3 import APIC, ID3, TDRC, TIT2, TPE1, TPE2, TALB, TRCK, TXXX
+
+    audio = MutagenFile(path)
+    if audio is None:
+        log.error("write_tags: cannot read audio file %s", path)
+        return False
+
+    mime = "image/png" if (cover_bytes and cover_bytes[:8] == b"\x89PNG\r\n\x1a\n") else "image/jpeg"
+
+    if isinstance(audio, FLAC):
+        tags = FLAC(path)
+        tags["TITLE"] = title
+        tags["ARTIST"] = artist
+        tags["ALBUMARTIST"] = album_artist
+        tags["ALBUM"] = album
+        tags["TRACKNUMBER"] = f"{track}/{total_tracks}"
+        if year:
+            tags["DATE"] = year
+        if mbid:
+            tags["MUSICBRAINZ_ALBUMID"] = mbid
+        if cover_bytes is not None:
+            pic = FlacPicture()
+            pic.data = cover_bytes
+            pic.type = 3  # cover front
+            pic.mime = mime
+            tags.clear_pictures()
+            tags.add_picture(pic)
+        tags.save()
+
+    elif isinstance(audio, ID3):
+        tags = ID3(path)
+        tags.add(TIT2(encoding=3, text=title))
+        tags.add(TPE1(encoding=3, text=artist))
+        tags.add(TPE2(encoding=3, text=album_artist))
+        tags.add(TALB(encoding=3, text=album))
+        tags.add(TRCK(encoding=3, text=f"{track}/{total_tracks}"))
+        if year:
+            tags.add(TDRC(encoding=3, text=year))
+        if mbid:
+            tags.add(TXXX(encoding=3, desc="MusicBrainz Album Id", text=mbid))
+        if cover_bytes is not None:
+            tags.add(APIC(encoding=3, mime=mime, type=3, desc="Cover", data=cover_bytes))
+        tags.save(path, v2_version=4)
+
+    elif isinstance(audio, MP4):
+        tags = MP4(path)
+        tags["\xa9nam"] = title
+        tags["\xa9ART"] = artist
+        tags["aART"] = album_artist
+        tags["\xa9alb"] = album
+        tags["trkn"] = [(track, total_tracks)]
+        if year:
+            tags["\xa9day"] = year
+        if mbid:
+            tags["----:com.example:MUSICBRAINZ_ALBUMID"] = mbid.encode("utf-8")
+        if cover_bytes is not None:
+            tags["covr"] = [MP4Cover(cover_bytes)]
+        tags.save()
+
+    elif isinstance(audio, OggVorbis):
+        tags = OggVorbis(path)
+        tags["TITLE"] = title
+        tags["ARTIST"] = artist
+        tags["ALBUMARTIST"] = album_artist
+        tags["ALBUM"] = album
+        tags["TRACKNUMBER"] = f"{track}/{total_tracks}"
+        if year:
+            tags["DATE"] = year
+        if mbid:
+            tags["MUSICBRAINZ_ALBUMID"] = mbid
+        tags.save()
+
+    else:
+        log.error("write_tags: unsupported audio format for %s", path)
+        return False
+
+    log.info("write_tags: wrote tags on %s (track %d/%d)", path, track, total_tracks)
+    return True
+
+
+def tag_file(path, track, vault_key, mbid, disc=1, cover_path=None, move_path=True,
+             local_meta: dict = None):
+    """Tag `path` with MusicBrainz metadata, using the correct format for the file type.
+
+    If `mbid` is empty the archive is treated as untagged: no MusicBrainz lookup is
+    performed, the file is moved into the untagged_CD/<DISCID>/ vault folder without
+    tagging, and the track is flagged as untagged in the database.
+
+    If `local_meta` is provided (from CD-TEXT), the file IS tagged with the local
+    metadata even when `mbid` is empty. The file goes into the normal vault layout
+    (not untagged_CD/) with CD-TEXT tags written directly to the file.
+    """
+    if not mbid:
+        if local_meta:
+            # ── Local metadata (CD-TEXT): tag with local data ───────────────────
+            _tag_with_local(path, track, local_meta, cover_path)
+            safe_title = _sanitize_name(local_meta.get("track_title", f"Track {track}"))
+            safe_artist = _sanitize_name(local_meta.get("artist", "Unknown Artist"))
+            safe_album = _sanitize_name(local_meta.get("album", "Unknown Album"))
+            year = local_meta.get("year", "") or ""
+            dest = config.vault_format.format(
+                track_title=safe_title,
+                track_num=track,
+                artist=safe_artist,
+                album=f"{safe_album} ({year})" if year else safe_album,
+                year=year,
+            )
+            dest = os.path.join(config.vault_dir, dest)
+            dest += f".{config.ffmpeg_format}"
+            dirname, _ = os.path.split(dest)
+            os.makedirs(dirname, exist_ok=True)
+            shutil.move(path, dest)
+            db_update_track(vault_key, track - 1, path=dest, state="done", untagged=1)
+            log.info("Tagged with CD-TEXT → %s", dest)
+            return
+        
+        # ── Untagged archive: move without tagging ──────────────────────────────
+        safe_title = _sanitize_name(f"Track {track}")
+        dest = os.path.join(config.vault_dir, "untagged_CD", str(vault_key),
+                            f"{track:02d} - {safe_title}{'.' + config.ffmpeg_format}")
+        dirname, _ = os.path.split(dest)
+        os.makedirs(dirname, exist_ok=True)
+        shutil.move(path, dest)
+        db_update_track(vault_key, track - 1, path=dest, state="done", untagged=1)
+        return
+
     release = get_release(mbid)
     media = release["medium-list"]
     medium = next(m for m in media if int(m["position"]) == disc)
@@ -125,6 +262,108 @@ def _set_common_vorbis(tags, track, total_tracks, disc, num_media,
         tags.add_picture(pic)
 
 
+def _tag_with_local(path: str, track: int, local_meta: dict, cover_path: str = None):
+    """Tag an audio file with local CD-TEXT metadata (no MusicBrainz release needed)."""
+    log.info("_tag_with_local: local_meta keys=%s, artist=%s, album=%s, track_titles=%s",
+             list(local_meta.keys()), local_meta.get("artist"), local_meta.get("album"),
+             local_meta.get("track_titles", {}))
+    """Tag an audio file with local CD-TEXT metadata (no MusicBrainz release needed).
+    
+    local_meta should contain:
+        - artist (str): performing artist
+        - album (str): album title  
+        - year (str, optional): release year
+        - track_titles (dict): {track_number: title} for all tracks
+        - total_tracks (int): total number of tracks
+        - cover_path (str, optional): path to cover art image
+    """
+    from mutagen import File as MutagenFile
+    from mutagen.flac import FLAC, Picture as FlacPicture
+    from mutagen.mp4 import MP4, MP4Cover
+    from mutagen.oggvorbis import OggVorbis
+    from mutagen.id3 import ID3, TIT2, TPE1, TPE2, TALB, TRCK, TDRC
+    
+    audio = MutagenFile(path)
+    if audio is None:
+        log.error("_tag_with_local: cannot read %s", path)
+        return False
+    
+    artist = local_meta.get("artist", "Unknown Artist")
+    album = local_meta.get("album", "Unknown Album")
+    year = local_meta.get("year", "")
+    total_tracks = local_meta.get("total_tracks", track)
+    track_title = local_meta.get("track_titles", {}).get(track, f"Track {track}")
+    
+    if isinstance(audio, FLAC):
+        tags = FLAC(path)
+        tags["TITLE"] = track_title
+        tags["ARTIST"] = artist
+        tags["ALBUMARTIST"] = artist  # CD-TEXT usually doesn't distinguish
+        tags["ALBUM"] = album
+        tags["TRACKNUMBER"] = f"{track}/{total_tracks}"
+        if year:
+            tags["DATE"] = year
+        if cover_path:
+            with open(cover_path, "rb") as f:
+                cover = f.read()
+            mime = "image/png" if cover[:8] == b"\x89PNG\r\n\x1a\n" else "image/jpeg"
+            pic = FlacPicture()
+            pic.data = cover
+            pic.type = 3  # cover front
+            pic.mime = mime
+            tags.clear_pictures()
+            tags.add_picture(pic)
+        tags.save()
+        
+    elif isinstance(audio, ID3):
+        tags = ID3(path)
+        tags.add(TIT2(encoding=3, text=track_title))
+        tags.add(TPE1(encoding=3, text=artist))
+        tags.add(TPE2(encoding=3, text=artist))  # album artist = artist for CD-TEXT
+        tags.add(TALB(encoding=3, text=album))
+        tags.add(TRCK(encoding=3, text=f"{track}/{total_tracks}"))
+        if year:
+            tags.add(TDRC(encoding=3, text=year))
+        if cover_path:
+            with open(cover_path, "rb") as f:
+                cover = f.read()
+            mime = "image/png" if cover[:8] == b"\x89PNG\r\n\x1a\n" else "image/jpeg"
+            tags.add(APIC(encoding=3, mime=mime, type=3, desc="Cover", data=cover))
+        tags.save(path, v2_version=4)
+        
+    elif isinstance(audio, MP4):
+        tags = MP4(path)
+        tags["\xa9nam"] = track_title
+        tags["\xa9ART"] = artist
+        tags["aART"] = artist  # album artist = artist for CD-TEXT
+        tags["\xa9alb"] = album
+        tags["trkn"] = [(track, total_tracks)]
+        if year:
+            tags["\xa9day"] = year
+        if cover_path:
+            with open(cover_path, "rb") as f:
+                cover = f.read()
+            tags["covr"] = [MP4Cover(cover)]
+        tags.save()
+        
+    elif isinstance(audio, OggVorbis):
+        tags = OggVorbis(path)
+        tags["TITLE"] = track_title
+        tags["ARTIST"] = artist
+        tags["ALBUMARTIST"] = artist  # CD-TEXT usually doesn't distinguish
+        tags["ALBUM"] = album
+        tags["TRACKNUMBER"] = f"{track}/{total_tracks}"
+        if year:
+            tags["DATE"] = year
+        tags.save()
+    else:
+        log.error("_tag_with_local: unsupported format for %s", path)
+        return False
+    
+    log.info("_tag_with_local: tagged %s → %s – %s (%d/%d)", path, artist, album, track, total_tracks)
+    return True
+
+
 def _tag_flac(path, track, total_tracks, disc, num_media,
               track_title, artist, album_artist, release, credit,
               track_id, cover_path):
@@ -189,7 +428,7 @@ def _tag_mp3(path, track, total_tracks, disc, num_media,
 
 def _tag_mp4(path, track, total_tracks, disc, num_media,
              track_title, artist, album_artist, release, credit, cover_path):
-    from mutagen.mp4 import MP4AlbumArt
+    from mutagen.mp4 import MP4, MP4Cover
     tags = MP4() if not os.path.exists(path) else MP4(path)
     tags["\xa9nam"] = track_title
     tags["\xa9ART"] = artist
@@ -217,6 +456,6 @@ def _tag_mp4(path, track, total_tracks, disc, num_media,
 
     if cover_path:
         with open(cover_path, "rb") as f:
-            tags["covr"] = [MP4AlbumArt(f.read())]
+            tags["covr"] = [MP4Cover(f.read())]
 
     tags.save()

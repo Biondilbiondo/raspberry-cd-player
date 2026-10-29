@@ -28,6 +28,7 @@ def _rip_chain(start_track: int,
                vault_key: str,
                mbid: str,
                art_path: str,
+               local_meta: dict = None,
                cdparanoia_timeout: int = 6000):
     """Rip and archive a CD. Runs in a child process.
 
@@ -71,10 +72,10 @@ def _rip_chain(start_track: int,
             log.warning("Track %d still pending (rip failed?), skipping encode", track)
             continue
 
-        _encode_ripped_track(vault_key, track, mbid, art_path)
+        _encode_ripped_track(vault_key, track, mbid, art_path, local_meta)
     
     # Finally remove the cache dir
-    _cache_dir = os.dirname(db_get_track(vault_key, 0)['wav_path'])
+    _cache_dir = os.path.dirname(db_get_track(vault_key, 0)['wav_path'])
     try:
         os.rmdir(_cache_dir)
     except OSError:
@@ -125,7 +126,8 @@ def _rip_track(vault_key: str, track: int, cdparanoia_timeout: int) -> bool:
         return False
 
 
-def _encode_ripped_track(vault_key: str, track: int, mbid: str, art_path: str):
+def _encode_ripped_track(vault_key: str, track: int, mbid: str, art_path: str,
+                        local_meta: dict = None):
     """Encode WAV → FLAC/MP3, tag, move to vault, update DB."""
     wav_path = db_get_track(vault_key, track)['wav_path']
     if not os.path.exists(wav_path):
@@ -157,7 +159,8 @@ def _encode_ripped_track(vault_key: str, track: int, mbid: str, art_path: str):
 
     log.info("Tagging and moving track %d → vault", track)
     try:
-        tag_file(encoded_path, track + 1, vault_key, mbid, cover_path=art_path)
+        tag_file(encoded_path, track + 1, vault_key, mbid, cover_path=art_path,
+                local_meta=local_meta)
     except Exception as exc:
         log.error("tag_file failed for track %d: %s", track, exc)
         return
