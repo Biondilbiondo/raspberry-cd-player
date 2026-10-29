@@ -145,7 +145,7 @@ class MusicPlayer:
         for i in range(ntracks):
             if db_get_track_state(self.vault_key, i) == "ripping":
                 wav = db_get_track(self.vault_key, i)['wav_path']
-                db_add_entry(self.vault_key, ntracks, i, "", state="pending", wav_path=wav)
+                db_update_track(self.vault_key, i, state="pending")
                 try:
                     os.remove(wav)
                 except OSError:
@@ -244,7 +244,12 @@ class MusicPlayer:
                     log.info("Track %d reset: ripping → pending, WAV removed", i)
                 except OSError:
                     pass
-                
+
+        for i in range(_ntracks):
+            row = db_get_track(self.vault_key, i)
+            if row and row['state'] != 'done':
+                db_update_track(self.vault_key, i, path=enc, wav_path=wav)
+
         meta    = fetch_cd_metadata(_disc_info)
 
         self.album_info = meta
