@@ -70,6 +70,7 @@ class MusicPlayer:
 
         self._running        = True
         self.vault_key       = None
+        self._stopped        = False
 
         # Progress bar state
         self._playback_pos   = 0.0
@@ -340,6 +341,7 @@ class MusicPlayer:
 
     def _start_playback(self):
         self._reset_progress()
+        self._stopped = False
         self.state  = State.PLAYBACK
         self.paused = False
         self._play_track(self.current_track)
@@ -457,6 +459,7 @@ class MusicPlayer:
                                 self.player.resume()
                         elif control == "stop":
                             self.player.stop()
+                            self._stopped = True
                         else:
                             scroll = self.ui.get_scroll_button_at(cx, cy, CTRL_Y)
                             if scroll == "up":
@@ -516,6 +519,7 @@ class MusicPlayer:
 
             elif event == InputEvent.BACK:
                 self.player.stop()
+                self._stopped = True
                 self.state = self.prev_state or State.MAIN_MENU
 
     def _load_vault_list(self) -> list:
@@ -603,7 +607,7 @@ class MusicPlayer:
             elif s == State.CD_LOADING:
                 pass   # ui.show_loading() already painted
             elif s == State.PLAYBACK:
-                if self.player.is_idle():
+                if self.player.is_idle() and not self._stopped:
                     if self.current_track + 1 < len(self.tracklist):
                         self._play_track(self.current_track + 1)
                     else:
