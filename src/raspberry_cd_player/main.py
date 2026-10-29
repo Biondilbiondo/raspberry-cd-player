@@ -51,7 +51,7 @@ class MusicPlayer:
 
         self.player   = Player()
         self.ui       = UI()
-        self.cd       = CDHandler()
+        self.cd       = CDHandler(config.cd_device)
         self.library  = LibraryManager()
         self.input    = InputHandler()
 
@@ -239,7 +239,7 @@ class MusicPlayer:
                 if row and row['state'] != 'done':
                     db_update_track(self.vault_key, i, path=enc, wav_path=wav)
 
-            meta    = fetch_cd_metadata(_disc_info)
+            meta    = fetch_cd_metadata(_disc_info, device=config.cd_device)
 
             self.album_info = meta
             self.tracklist  = meta.get("tracks", _disc_info['tracks'])
