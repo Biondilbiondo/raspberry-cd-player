@@ -164,13 +164,12 @@ class MusicPlayer:
                 self._schedule(self._load_cd)
                 was_present = True
             elif not present and was_present:
-                if self.state != State.CD_LOADING:
-                    log.info("CD removed")
-                    if self.state == State.PLAYBACK and self.source == "cd-rip":
-                        self._kill_rip()
-                        self.player.stop()
-                    self.state = State.MAIN_MENU
-                    was_present = False
+                log.info("CD removed")
+                if self.state == State.PLAYBACK and self.source == "cd-rip":
+                    self._kill_rip()
+                    self.player.stop()
+                self.state = State.MAIN_MENU
+                was_present = False
             was_present = present
             time.sleep(2)
 
@@ -181,99 +180,92 @@ class MusicPlayer:
     def _load_cd(self):
         self.state = State.CD_LOADING
         self.ui.show_loading("Reading CD…")
+        try:
+            self.cd.set_speed()
 
-        # Set drive speed so disc is ready before any detection
-        self.cd.set_speed()
+            # Try data disc first (blkid check) — fallback is tried again below
+            # in case blkid requires root and silently fails.
+            if self.cd.is_data_disc():
+                self.ui.show_message("Data disc – no audio files found", duration=3)
+                self.state = State.MAIN_MENU
+                return
 
-        # Try data disc first (blkid check) — fallback is tried again below
-        # in case blkid requires root and silently fails.
-        if self.cd.is_data_disc():
-            self.ui.show_message("Data disc – no audio files found", duration=3)
+            _disc_info = self.cd.get_disc_info()
+
+            if _disc_info is None:
+                log.warning("Could not detect disc")
+                self.ui.show_message("Read error or empty CD", duration=3)
+                self.state = State.MAIN_MENU
+                return
+
+            if not _disc_info['tracks']:
+                log.warning("No tracks found on CD")
+                self.ui.show_message("Read error or empty CD", duration=3)
+                self.state = State.MAIN_MENU
+                return
+
+            self._disc_id_str = _disc_info['cd-discid-str']
+
+            self.vault_key = _disc_info["mb_id"]
+            if db_is_cd_present(self.vault_key):
+                log.info("This CD is present in the database")
+                if db_is_cd_complete(self.vault_key):
+                    log.info("This CD is complete in the vault – playing from archive")
+                    if self._start_vault_playback(self.vault_key, _disc_info['tracks']):
+                        return
+                    # One or more files missing – fall through to live rip path
+                    log.info("Vault files incomplete – falling back to live rip")
+                else:
+                    log.info("CD partially ripped – resuming ripping")
+
+            _ntracks = len(_disc_info['tracks'])
+
+            for i in range(_ntracks):
+                wav = wav_file_path(self.vault_key, i)
+                enc = encoded_file_path(self.vault_key, i)
+                if db_get_track(self.vault_key, i) is None:
+                    db_add_entry(self.vault_key, _ntracks, i, enc, state="pending", wav_path=wav)
+
+                elif db_get_track_state(self.vault_key, i) == "ripping":
+                    db_update_track(self.vault_key, i, state="pending", wav_path=wav)
+                    try:
+                        os.remove(wav)
+                        log.info("Track %d reset: ripping → pending, WAV removed", i)
+                    except OSError:
+                        pass
+
+            for i in range(_ntracks):
+                row = db_get_track(self.vault_key, i)
+                if row and row['state'] != 'done':
+                    db_update_track(self.vault_key, i, path=enc, wav_path=wav)
+
+            meta    = fetch_cd_metadata(_disc_info)
+
+            self.album_info = meta
+            self.tracklist  = meta.get("tracks", _disc_info['tracks'])
+
+            # Normalise durations to MM:SS strings
+            for i, t in enumerate(self.tracklist):
+                # Extract duration from disc directly to avoid issues
+                dd = float(_disc_info['tracks'][i]['duration'])
+                t['disc_duration_s'] = dd
+                t['disc_duration'] = f"{int(dd // 60):02d}:{int(dd % 60):02d}"
+
+                d = t.get("duration", 0)
+                if isinstance(d, (int, float)):
+                    t["duration"] = f"{int(d // 60):02d}:{int(d % 60):02d}"
+                else:
+                    t["duration"] = str(d)
+
+            self.source        = "cd-rip"
+            self.current_track = 0
+            self._rip_async(0)
+            time.sleep(1)
+            self._start_playback()
+        except Exception:
+            log.exception("Failed to load CD")
+            self.ui.show_message("Error loading CD", duration=3)
             self.state = State.MAIN_MENU
-            return
-
-## TODO
-# 2026-10-11 22:28:29,150 [INFO] player: Initialising player (python-mpv)…
-# 2026-10-11 22:28:29,277 [INFO] ui: Display 540x960, rotation 0, scaled=True
-# 2026-10-11 22:28:29,317 [INFO] main: CD inserted – triggering load
-# 2026-10-11 22:28:29,330 [INFO] cd_handler: CD drive speed set to 16x
-# 2026-10-11 22:28:37,180 [ERROR] cd_handler: cd-discid failed: cannot open device `/dev/cdrom'
-# 2026-10-11 22:28:37,180 [ERROR] main: Scheduled call failed: tuple indices must be integers or slices, not str
-# Traceback (most recent call last):
-#   File "/home/mattia/Progetti/raspberry-cd-player/src/raspberry_cd_player/main.py", line 389, in run
-#     ev.fn(*ev.args)
-#     ~~~~~^^^^^^^^^^
-#   File "/home/mattia/Progetti/raspberry-cd-player/src/raspberry_cd_player/main.py", line 179, in _load_cd
-#     if not _disc_info['tracks']:
-
-        _disc_info = self.cd.get_disc_info()
-
-        if not _disc_info['tracks']:
-            log.warning("No tracks found on CD")
-            self.ui.show_message("Read error or empty CD", duration=3)
-            self.state = State.MAIN_MENU
-            return
-
-        self._disc_id_str = _disc_info['cd-discid-str']
-
-        # TODO Check if the disc is already in the DB.
-        self.vault_key = _disc_info["mb_id"]
-        if db_is_cd_present(self.vault_key):
-            log.info("This CD is present in the database")
-            if db_is_cd_complete(self.vault_key):
-                log.info("This CD is complete in the vault – playing from archive")
-                if self._start_vault_playback(self.vault_key, _disc_info['tracks']):
-                    return
-                # One or more files missing – fall through to live rip path
-                log.info("Vault files incomplete – falling back to live rip")
-            else:
-                log.info("CD partially ripped – resuming ripping")
-        
-        _ntracks = len(_disc_info['tracks'])
-
-        for i in range(_ntracks):
-            wav = wav_file_path(self.vault_key, i)
-            enc = encoded_file_path(self.vault_key, i)
-            if db_get_track(self.vault_key, i) is None:
-                db_add_entry(self.vault_key, _ntracks, i, enc, state="pending", wav_path=wav)
-
-            elif db_get_track_state(self.vault_key, i) == "ripping":
-                db_update_track(self.vault_key, i, state="pending", wav_path=wav)
-                try:
-                    os.remove(wav)
-                    log.info("Track %d reset: ripping → pending, WAV removed", i)
-                except OSError:
-                    pass
-
-        for i in range(_ntracks):
-            row = db_get_track(self.vault_key, i)
-            if row and row['state'] != 'done':
-                db_update_track(self.vault_key, i, path=enc, wav_path=wav)
-
-        meta    = fetch_cd_metadata(_disc_info)
-
-        self.album_info = meta
-        self.tracklist  = meta.get("tracks", _disc_info['tracks'])
-
-        # Normalise durations to MM:SS strings
-        for i, t in enumerate(self.tracklist):
-            # Extract duration from disc directly to avoid issues
-            dd = float(_disc_info['tracks'][i]['duration'])
-            t['disc_duration_s'] = dd
-            t['disc_duration'] = f"{int(dd // 60):02d}:{int(dd % 60):02d}"
-
-            d = t.get("duration", 0)
-            if isinstance(d, (int, float)):
-                t["duration"] = f"{int(d // 60):02d}:{int(d % 60):02d}"
-            else:
-                t["duration"] = str(d)
-
-        self.source        = "cd-rip"
-        self.current_track = 0
-        # Since it is still not in the vault, it should be started.
-        self._rip_async(0)
-        time.sleep(1)
-        self._start_playback()
 
     def _start_vault_playback(self, vault_key: str, fallback_tracks: list) -> bool:
         """Load archived vault files and start playback without ripping.
@@ -484,6 +476,11 @@ class MusicPlayer:
                 self._main_menu_select()
             elif event == InputEvent.BACK:
                 pass   # nothing to go back to from main menu
+
+        # ── CD loading ────────────────────────────────────────────────────────
+        elif s == State.CD_LOADING:
+            if event == InputEvent.BACK:
+                self.state = State.MAIN_MENU
 
         # ── Library browser ───────────────────────────────────────────────────
         elif s == State.LIBRARY_BROWSE:
