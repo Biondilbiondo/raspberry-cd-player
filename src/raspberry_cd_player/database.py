@@ -1,5 +1,6 @@
 import sqlite3
 import logging
+import os
 
 from .config import config
 
@@ -178,16 +179,30 @@ def db_is_cd_present(vault_key):
 
 
 def db_is_cd_complete(vault_key):
-    """Return True if all tracks 0..ntracks-1 exist (no gaps)."""
+    """Return True if all tracks are done and their files exist on disk.
+    
+    If any track has a missing file, reset its state to pending and return False.
+    """
     with _get_conn() as conn:
-        row = conn.execute(
-            "SELECT ntracks, COUNT(*) FROM tracks WHERE vault_key = ? GROUP BY ntracks",
+        rows = conn.execute(
+            "SELECT track, ntracks, path, state FROM tracks "
+            "WHERE vault_key = ? ORDER BY track",
             (vault_key,),
-        ).fetchone()
-        if row is None:
+        ).fetchall()
+        if not rows:
             return False
-        ntracks, count = row
-        return count == ntracks
+        ntracks = rows[0][1]
+        if len(rows) != ntracks:
+            return False
+        for track, _, path, state in rows:
+            if state != 'done' or not os.path.exists(path):
+                conn.execute(
+                    "UPDATE tracks SET state = 'pending' WHERE vault_key = ? AND track = ?",
+                    (vault_key, track),
+                )
+                conn.commit()
+                return False
+        return True
 
 
 def db_get_all_keys():
