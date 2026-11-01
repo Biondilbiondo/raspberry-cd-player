@@ -20,7 +20,7 @@ import pygame
 
 from .player import Player
 from .ui import UI, CTRL_RADIUS, CTRL_Y, VISIBLE_TRACKS
-from .metadata_manager import fetch_cd_metadata, fetch_album_metadata, read_file_metadata, extract_cover_from_tracks
+from .metadata_manager import fetch_cd_metadata, read_file_metadata, extract_cover_from_tracks
 from .cd_handler import CDHandler
 from .input_handler import InputHandler, InputEvent, ClickEvent
 from .library_manager import LibraryManager
@@ -225,7 +225,8 @@ class MusicPlayer:
                 wav = wav_file_path(self.vault_key, i)
                 enc = encoded_file_path(self.vault_key, i)
                 if db_get_track(self.vault_key, i) is None:
-                    db_add_entry(self.vault_key, _ntracks, i, enc, state="pending", wav_path=wav)
+                    db_add_entry(self.vault_key, _ntracks, i, enc, 
+                                 state="pending", wav_path=wav)
 
                 elif db_get_track_state(self.vault_key, i) == "ripping":
                     db_update_track(self.vault_key, i, state="pending", wav_path=wav)

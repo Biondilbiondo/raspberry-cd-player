@@ -56,7 +56,7 @@ def init_db():
         conn.commit()
 
 
-def db_add_entry(vault_key, ntracks, track, path="", state="pending", wav_path="", untagged=0):
+def db_add_entry(vault_key, ntracks, track, path="", state="pending", wav_path="", untagged=1):
     """Insert or update a track record. Thread-safe.
     
     On conflict (same vault_key + track), updates path, ntracks, state and untagged.
@@ -94,6 +94,26 @@ def db_get_track(vault_key, track):
 
 
 # ── Core CRUD ─────────────────────────────────────────────────────────────────
+
+def db_update_path(old_path: str, new_path: str) -> None:
+    """Update a track's path by searching on the old path.
+    
+    Raises ValueError if no track with the given old_path is found.
+    """
+    with _get_conn() as conn:
+        row = conn.execute(
+            "SELECT vault_key, track FROM tracks WHERE path = ?",
+            (old_path,),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"db_update_path: no track found with path={old_path}")
+        vault_key, track = row
+        conn.execute(
+            "UPDATE tracks SET path = ? WHERE vault_key = ? AND track = ?",
+            (new_path, vault_key, track),
+        )
+        conn.commit()
+
 
 def db_update_track(vault_key, track, **fields):
     """Update one or more fields of a track record."""
@@ -183,9 +203,10 @@ def db_is_cd_complete(vault_key):
     
     If any track has a missing file, reset its state to pending and return False.
     """
+    from .paths import encoded_file_path, wav_file_path
     with _get_conn() as conn:
         rows = conn.execute(
-            "SELECT track, ntracks, path, state FROM tracks "
+            "SELECT track, ntracks, path, wav_path, state FROM tracks "
             "WHERE vault_key = ? ORDER BY track",
             (vault_key,),
         ).fetchall()
@@ -194,14 +215,33 @@ def db_is_cd_complete(vault_key):
         ntracks = rows[0][1]
         if len(rows) != ntracks:
             return False
-        for track, _, path, state in rows:
-            if state != 'done' or not os.path.exists(path):
-                conn.execute(
-                    "UPDATE tracks SET state = 'pending' WHERE vault_key = ? AND track = ?",
-                    (vault_key, track),
-                )
-                conn.commit()
+        for track, _, path, wav_path, state in rows:
+            if not os.path.exists(path):
+                if os.path.exists(wav_path) and state != 'ripped':
+                    log.warning(f"Correcting db for track {vault_key}/{track} {state}->ripped")
+                    conn.execute(
+                        "UPDATE tracks SET state = 'ripped', "
+                        f"path='{encoded_file_path(vault_key, track)}' "
+                        "WHERE vault_key = ? AND track = ?",
+                        (vault_key, track),
+                    )
+                    state = 'ripped'
+                    conn.commit()
+
+                elif state != 'pending':
+                    log.warning(f"Correcting db for track {vault_key}/{track} {state}->pending")
+                    conn.execute(
+                        "UPDATE tracks SET state = 'pending', "
+                        f"path='{encoded_file_path(vault_key, track)}', wav_path='{wav_file_path(vault_key, track)}' "
+                        "WHERE vault_key = ? AND track = ?",
+                        (vault_key, track),
+                    )
+                    state = 'pending'
+                    conn.commit()
+
+            if state != 'done':
                 return False
+            
         return True
 
 

@@ -482,26 +482,7 @@ def _apply_track(vault_key: str, idx: int, artist: str, album_artist: str, album
     if not ok:
         return f"track {idx + 1}: tag write failed"
 
-    path = src
-    if untagged_before:
-        # Promote untagged -> tagged: move into the standard vault layout.
-        dest = os.path.join(
-            config.vault_dir,
-            config.vault_format.format(
-                artist=am._sanitize_name(artist),
-                album=am._sanitize_name(album),
-                year=year,
-                track_num=num,
-                track_title=am._sanitize_name(title),
-            ),
-        )
-        dest += f".{config.ffmpeg_format}"
-        dest = _unique_dest(dest, path)
-        os.makedirs(os.path.dirname(dest), exist_ok=True)
-        shutil.move(path, dest)
-        path = dest
-
-    db.db_update_track(vault_key, idx, path=path, untagged=0, state="done")
+    db.db_update_track(vault_key, idx, untagged=0, state="done")
     return None
 
 

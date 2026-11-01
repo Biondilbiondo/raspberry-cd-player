@@ -5,9 +5,9 @@ import logging
 from .config import config
 from .add_metadata import tag_file
 from .database import (
-    db_add_entry, db_update_track,
+    db_update_track,
     db_get_pending_tracks, db_get_track_state,
-    db_is_cd_complete, db_get_track
+    db_get_track
 )
 
 log = logging.getLogger("cd rip")
@@ -166,10 +166,19 @@ def _encode_ripped_track(vault_key: str, track: int, mbid: str, art_path: str,
         return
 
     # Clean up cache files
-    for f in (wav_path, encoded_path):
+    if os.path.exists(wav_path):
         try:
-            os.remove(f)
+            os.remove(wav_path)
         except OSError:
             pass
+    
+    archived_path = db_get_track(vault_key, track)['path']
+    if os.path.exists(encoded_path) and os.path.abspath(archived_path) != os.path.abspath(encoded_path):
+        log.warning(f"File {encoded_path} is not expected to be existing!")
+        try:
+            os.remove(wav_path)
+        except OSError:
+            pass
+
 
     log.info("Track %d: encoded → archived, cache cleaned", track)
