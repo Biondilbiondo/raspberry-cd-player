@@ -453,14 +453,20 @@ class MusicPlayer:
                         elif control == "next":
                             self._play_track(self.current_track + 1)
                         elif control == "play_pause":
-                            self.paused = not self.paused
-                            if self.paused:
-                                self.player.pause()
+                            if self._stopped:
+                                self._stopped = False
+                                self._play_track(self.current_track)
                             else:
-                                self.player.resume()
+                                self.paused = not self.paused
+                                if self.paused:
+                                    self.player.pause()
+                                else:
+                                    self.player.resume()
                         elif control == "stop":
                             self.player.stop()
                             self._stopped = True
+                            self.current_track = 0
+                            self.paused = False
                         else:
                             scroll = self.ui.get_scroll_button_at(cx, cy, CTRL_Y)
                             if scroll == "up":
