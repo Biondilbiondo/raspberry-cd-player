@@ -144,7 +144,24 @@ class _Config:
 
     @property
     def ffmpeg_format(self) -> str:
-        return _config_parser.get("ffmpeg", "format", fallback=_DEFAULTS["ffmpeg.format"])
+        raw = _config_parser.get("ffmpeg", "format", fallback=_DEFAULTS["ffmpeg.format"])
+        return _validate_format(raw)
+
+
+# ── Format validation ────────────────────────────────────────────────────────
+_SUPPORTED_FORMATS = {"mp3", "flac"}
+
+
+def _validate_format(format_name: str) -> str:
+    """Validate that the configured format is supported. Only mp3 and flac are allowed."""
+    fmt = format_name.lower().strip()
+    if fmt not in _SUPPORTED_FORMATS:
+        raise ValueError(
+            f"Unsupported audio format: '{fmt}'. "
+            f"Only '{', '.join(sorted(_SUPPORTED_FORMATS))}' are supported. "
+            f"Please update the [ffmpeg] section in config.ini."
+        )
+    return fmt
 
 
 # Single shared instance

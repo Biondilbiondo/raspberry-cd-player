@@ -13,7 +13,7 @@ from typing import Union
 
 from .config import config
 
-VAULT_AUDIO_EXTS = {".flac", ".wav", ".mp3", ".ogg", ".m4a"}
+VAULT_AUDIO_EXTS = {".flac", ".mp3"}
 AUTOMATIC_RIPPING = True
 
 import pygame

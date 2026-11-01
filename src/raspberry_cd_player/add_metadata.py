@@ -2,8 +2,6 @@ import musicbrainzngs as mb
 from mutagen.id3 import (APIC, ID3, TALB, TCMP, TDRC, TIT2, TPE1, TPE2, TPOS,
                          TPUB, TRCK, TXXX, UFID)
 from mutagen.flac import FLAC, Picture as FlacPicture
-from mutagen.oggvorbis import OggVorbis
-from mutagen.mp4 import MP4
 import logging
 import os, shutil
 
@@ -33,14 +31,11 @@ def write_tags(path: str, artist: str, album_artist: str, album: str, title: str
                cover_bytes: bytes = None) -> bool:
     """Write tags from editor-provided metadata onto an audio file (web editor).
 
-    Format-aware: FLAC (Vorbis comments + picture), MP3 (ID3 + APIC),
-    MP4/M4A (iTunes atoms + freeform MB ids + covr), OGG (Vorbis comments).
+    Format-aware: FLAC (Vorbis comments + picture), MP3 (ID3 + APIC).
     Used when fixing metadata of existing (possibly untagged) archives.
     """
     from mutagen import File as MutagenFile
     from mutagen.flac import FLAC, Picture as FlacPicture
-    from mutagen.mp4 import MP4, MP4Cover
-    from mutagen.oggvorbis import OggVorbis
     from mutagen.id3 import APIC, ID3, TDRC, TIT2, TPE1, TPE2, TALB, TRCK, TXXX
 
     audio = MutagenFile(path)
@@ -84,34 +79,6 @@ def write_tags(path: str, artist: str, album_artist: str, album: str, title: str
         if cover_bytes is not None:
             tags.add(APIC(encoding=3, mime=mime, type=3, desc="Cover", data=cover_bytes))
         tags.save(path, v2_version=4)
-
-    elif isinstance(audio, MP4):
-        tags = MP4(path)
-        tags["\xa9nam"] = title
-        tags["\xa9ART"] = artist
-        tags["aART"] = album_artist
-        tags["\xa9alb"] = album
-        tags["trkn"] = [(track, total_tracks)]
-        if year:
-            tags["\xa9day"] = year
-        if mbid:
-            tags["----:com.example:MUSICBRAINZ_ALBUMID"] = mbid.encode("utf-8")
-        if cover_bytes is not None:
-            tags["covr"] = [MP4Cover(cover_bytes)]
-        tags.save()
-
-    elif isinstance(audio, OggVorbis):
-        tags = OggVorbis(path)
-        tags["TITLE"] = title
-        tags["ARTIST"] = artist
-        tags["ALBUMARTIST"] = album_artist
-        tags["ALBUM"] = album
-        tags["TRACKNUMBER"] = f"{track}/{total_tracks}"
-        if year:
-            tags["DATE"] = year
-        if mbid:
-            tags["MUSICBRAINZ_ALBUMID"] = mbid
-        tags.save()
 
     else:
         log.error("write_tags: unsupported audio format for %s", path)
@@ -186,16 +153,8 @@ def tag_file(path, track, vault_key, mbid, disc=1, cover_path=None, move_path=Tr
         _tag_flac(path, track, total_tracks, disc, len(media),
                   track_title, artist, album_artist, release, credit,
                   rec["id"], cover_path)
-    elif path.endswith(('.ogg',)):
-        _tag_ogg(path, track, total_tracks, disc, len(media),
-                 track_title, artist, album_artist, release, credit,
-                 rec["id"], cover_path)
     elif path.endswith(('.mp3',)):
         _tag_mp3(path, track, total_tracks, disc, len(media),
-                 track_title, artist, album_artist, release, credit,
-                 rec["id"], cover_path)
-    elif path.endswith(('.m4a', '.mp4')):
-        _tag_mp4(path, track, total_tracks, disc, len(media),
                  track_title, artist, album_artist, release, credit,
                  rec["id"], cover_path)
     else:
@@ -217,6 +176,7 @@ def tag_file(path, track, vault_key, mbid, disc=1, cover_path=None, move_path=Tr
         dest = os.path.join(config.vault_dir, dest)
         dest += f".{config.ffmpeg_format}"
 
+        log.debug(f"Moving file from {path} to {dest}")
         dirname, _ = os.path.split(dest)
         os.makedirs(dirname, exist_ok=True)
         shutil.move(path, dest)
@@ -279,8 +239,6 @@ def _tag_with_local(path: str, track: int, local_meta: dict, cover_path: str = N
     """
     from mutagen import File as MutagenFile
     from mutagen.flac import FLAC, Picture as FlacPicture
-    from mutagen.mp4 import MP4, MP4Cover
-    from mutagen.oggvorbis import OggVorbis
     from mutagen.id3 import ID3, TIT2, TPE1, TPE2, TALB, TRCK, TDRC
     
     audio = MutagenFile(path)
@@ -331,31 +289,6 @@ def _tag_with_local(path: str, track: int, local_meta: dict, cover_path: str = N
             tags.add(APIC(encoding=3, mime=mime, type=3, desc="Cover", data=cover))
         tags.save(path, v2_version=4)
         
-    elif isinstance(audio, MP4):
-        tags = MP4(path)
-        tags["\xa9nam"] = track_title
-        tags["\xa9ART"] = artist
-        tags["aART"] = artist  # album artist = artist for CD-TEXT
-        tags["\xa9alb"] = album
-        tags["trkn"] = [(track, total_tracks)]
-        if year:
-            tags["\xa9day"] = year
-        if cover_path:
-            with open(cover_path, "rb") as f:
-                cover = f.read()
-            tags["covr"] = [MP4Cover(cover)]
-        tags.save()
-        
-    elif isinstance(audio, OggVorbis):
-        tags = OggVorbis(path)
-        tags["TITLE"] = track_title
-        tags["ARTIST"] = artist
-        tags["ALBUMARTIST"] = artist  # CD-TEXT usually doesn't distinguish
-        tags["ALBUM"] = album
-        tags["TRACKNUMBER"] = f"{track}/{total_tracks}"
-        if year:
-            tags["DATE"] = year
-        tags.save()
     else:
         log.error("_tag_with_local: unsupported format for %s", path)
         return False
@@ -374,19 +307,14 @@ def _tag_flac(path, track, total_tracks, disc, num_media,
     tags.save()
 
 
-def _tag_ogg(path, track, total_tracks, disc, num_media,
-             track_title, artist, album_artist, release, credit,
-             track_id, cover_path):
-    tags = OggVorbis(path) if os.path.exists(path) else OggVorbis()
-    _set_common_vorbis(tags, track, total_tracks, disc, num_media,
-                       track_title, artist, album_artist, release, credit,
-                       track_id, cover_path)
-    tags.save()
-
 
 def _tag_mp3(path, track, total_tracks, disc, num_media,
-             track_title, artist, album_artist, release, credit, cover_path):
+             track_title, artist, album_artist, release, credit, 
+             track_id, cover_path):
     tags = ID3() if not os.path.exists(path) else ID3(path)
+    if tags:  # file existed with old ID3 tags — delete them to avoid duplicates
+        tags.delete()
+        tags = ID3()
     tags.add(TIT2(encoding=3, text=track_title))
     tags.add(TPE1(encoding=3, text=artist))
     tags.add(TPE2(encoding=3, text=album_artist))
@@ -406,7 +334,7 @@ def _tag_mp3(path, track, total_tracks, disc, num_media,
     for desc, val in [
         ("MusicBrainz Album Id", release["id"]),
         ("MusicBrainz Release Group Id", release["release-group"]["id"]),
-        ("MusicBrainz Release Track Id", t["id"]),
+        ("MusicBrainz Release Track Id", track_id),
         ("MusicBrainz Artist Id",
          [c["artist"]["id"] for c in credit
           if isinstance(c, dict) and "artist" in c]),
@@ -414,7 +342,7 @@ def _tag_mp3(path, track, total_tracks, disc, num_media,
         if val:
             tags.add(TXXX(encoding=3, desc=desc, text=val))
     tags.add(UFID(owner="http://musicbrainz.org",
-                  data=rec["id"].encode("ascii")))
+                  data=track_id.encode("ascii")))
 
     if cover_path:
         with open(cover_path, "rb") as f:
@@ -424,38 +352,3 @@ def _tag_mp3(path, track, total_tracks, disc, num_media,
                       desc="Cover", data=cover))
 
     tags.save(path, v2_version=4)
-
-
-def _tag_mp4(path, track, total_tracks, disc, num_media,
-             track_title, artist, album_artist, release, credit, cover_path):
-    from mutagen.mp4 import MP4, MP4Cover
-    tags = MP4() if not os.path.exists(path) else MP4(path)
-    tags["\xa9nam"] = track_title
-    tags["\xa9ART"] = artist
-    tags["aART"] = album_artist
-    tags["\xa9alb"] = release["title"]
-    tags["trkn"] = [(track, total_tracks)]
-    if num_media > 1:
-        tags["disk"] = [(disc, num_media)]
-    if release.get("date"):
-        tags["\xa9day"] = release["date"]
-    if album_artist.lower() == "various artists":
-        tags["\xa9cpg"] = 1
-
-    for desc, val in [
-        ("MUSICBRAINZ_ALBUMID", release["id"]),
-        ("MUSICBRAINZ_RELEASEGROUPID", release["release-group"]["id"]),
-        ("MUSICBRAINZ_TRACKID", t["id"]),
-    ]:
-        tags["----:com.example:" + desc] = val.encode("utf-8")
-
-    artist_ids = [c["artist"]["id"] for c in credit
-                  if isinstance(c, dict) and "artist" in c]
-    if artist_ids:
-        tags["----:com.example:MUSICBRAINZ_ARTISTID"] = ";".join(artist_ids).encode("utf-8")
-
-    if cover_path:
-        with open(cover_path, "rb") as f:
-            tags["covr"] = [MP4Cover(f.read())]
-
-    tags.save()

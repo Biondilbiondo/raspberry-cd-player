@@ -39,7 +39,7 @@ log = logging.getLogger("library")
 
 LIBRARY_JSON = os.path.join(config.library_dir, "library.json")
 
-AUDIO_EXTENSIONS = {".flac", ".wav", ".aiff", ".aif", ".alac", ".mp3", ".ogg", ".m4a"}
+AUDIO_EXTENSIONS = {".flac", ".mp3"}
 
 
 class LibraryManager:

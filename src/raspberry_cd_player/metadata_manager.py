@@ -714,12 +714,10 @@ def _unknown(raw_tracks: Optional[List[Dict]] = None) -> Dict:
 def read_file_metadata(path: str) -> Optional[Dict]:
     """Extract all useful metadata from a single audio file on disk.
     
-    Works with both ID3-tagged files (MP3, MP4) and VorbisComment files (FLAC, OGG).
+    Works with both ID3-tagged files (MP3) and VorbisComment files (FLAC).
     """
     from mutagen import File as MutagenFile
     from mutagen.flac import FLAC
-    from mutagen.mp4 import MP4
-    from mutagen.oggvorbis import OggVorbis
     from mutagen.mp3 import MP3
 
     try:
@@ -740,7 +738,7 @@ def read_file_metadata(path: str) -> Optional[Dict]:
 
     # Title
     title = ""
-    if isinstance(audio, (MP3, MP4)):
+    if isinstance(audio, MP3):
         for tag in audio.tags.values():
             if isinstance(tag, TIT2):
                 title = str(tag.text[0]) if tag.text else ""
@@ -751,7 +749,7 @@ def read_file_metadata(path: str) -> Optional[Dict]:
 
     # Artist
     artist = ""
-    if isinstance(audio, (MP3, MP4)):
+    if isinstance(audio, MP3):
         for tag in audio.tags.values():
             if isinstance(tag, TPE1):
                 artist = str(tag.text[0]) if tag.text else ""
@@ -760,7 +758,7 @@ def read_file_metadata(path: str) -> Optional[Dict]:
 
     # Album
     album = ""
-    if isinstance(audio, (MP3, MP4)):
+    if isinstance(audio, MP3):
         for tag in audio.tags.values():
             if isinstance(tag, TALB):
                 album = str(tag.text[0]) if tag.text else ""
@@ -769,7 +767,7 @@ def read_file_metadata(path: str) -> Optional[Dict]:
 
     # Year
     year = ""
-    if isinstance(audio, (MP3, MP4)):
+    if isinstance(audio, MP3):
         for tag in audio.tags.values():
             if isinstance(tag, TDRC):
                 year = str(tag.text[0])[:4] if tag.text else ""
@@ -814,8 +812,6 @@ def extract_cover_from_tracks(track_paths: List[str], cache_dir: Optional[str] =
     from mutagen import File as MutagenFile
     from mutagen.flac import FLAC
     from mutagen.mp3 import MP3
-    from mutagen.mp4 import MP4
-    from mutagen.oggvorbis import OggVorbis
 
     if not track_paths:
         return None
@@ -830,7 +826,7 @@ def extract_cover_from_tracks(track_paths: List[str], cache_dir: Optional[str] =
             for pic in audio.pictures:
                 art_bytes = pic.data
                 break
-        elif isinstance(audio, (MP3, MP4, OggVorbis)):
+        elif isinstance(audio, MP3):
             for tag in audio.tags.values():
                 if isinstance(tag, APIC):
                     art_bytes = tag.data
