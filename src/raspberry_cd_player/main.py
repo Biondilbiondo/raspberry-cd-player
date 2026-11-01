@@ -237,8 +237,8 @@ class MusicPlayer:
 
             for i in range(_ntracks):
                 row = db_get_track(self.vault_key, i)
-                if row and row['state'] != 'done':
-                    db_update_track(self.vault_key, i, path=enc, wav_path=wav)
+                if row and row['state'] == 'ripping':
+                    db_update_track(self.vault_key, i, state='pending')
 
             meta    = fetch_cd_metadata(_disc_info, device=config.cd_device)
 
