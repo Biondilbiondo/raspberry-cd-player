@@ -132,30 +132,33 @@ def _encode_ripped_track(vault_key: str, track: int, mbid: str, art_path: str,
     wav_path = db_get_track(vault_key, track)['wav_path']
     if not os.path.exists(wav_path):
         log.error("WAV not found for track %d: %s", track, wav_path)
-        return
+        return False
 
     encoded_path = db_get_track(vault_key, track)['path']
     log.info("Encoding track %d", track)
 
     if not shutil.which("ffmpeg"):
         log.error("ffmpeg not found — cannot encode track %d", track)
-        return
+        return False
 
     try:
-        subprocess.run(
+        r = subprocess.run(
             ["ffmpeg", "-y", "-i", wav_path] + config.ffmpeg_options.split() + [encoded_path],
             timeout=120,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
         if not os.path.exists(encoded_path):
             log.error("ffmpeg produced no output for track %d", track)
-            return
+            return False
+        if r.returncode != 0:
+            log.error("ffmpeg produced an error for track %d", track)
+            return False
     except subprocess.TimeoutExpired:
         log.error("ffmpeg timed out for track %d", track)
-        return
+        return False
     except Exception as exc:
         log.error("ffmpeg error for track %d: %s", track, exc)
-        return
+        return False
 
     log.info("Tagging and moving track %d → vault", track)
     try:
@@ -163,7 +166,7 @@ def _encode_ripped_track(vault_key: str, track: int, mbid: str, art_path: str,
                 local_meta=local_meta)
     except Exception as exc:
         log.error("tag_file failed for track %d: %s", track, exc)
-        return
+        return False
 
     # Clean up cache files
     if os.path.exists(wav_path):
@@ -180,5 +183,5 @@ def _encode_ripped_track(vault_key: str, track: int, mbid: str, art_path: str,
         except OSError:
             pass
 
-
     log.info("Track %d: encoded → archived, cache cleaned", track)
+    return True
