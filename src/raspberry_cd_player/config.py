@@ -31,7 +31,7 @@ _DEFAULTS = {
     "cd.open_timeout":     "10",
     "cd.speed":            "16",
     "cd.device":           "/dev/sr0",
-    "cdparanoia.flags":    "-Z -S",
+    "cdparanoia.flags":    "",
     "musicbrainz.agent":   "HiFiBerryMusicPlayer",
     "musicbrainz.version": "3.0",
     "musicbrainz.mail":    "none",

@@ -217,27 +217,17 @@ def db_is_cd_complete(vault_key):
             return False
         for track, _, path, wav_path, state in rows:
             if not os.path.exists(path):
-                if os.path.exists(wav_path) and state != 'ripped':
-                    log.warning(f"Correcting db for track {vault_key}/{track} {state}->ripped")
-                    conn.execute(
-                        "UPDATE tracks SET state = 'ripped', "
-                        f"path='{encoded_file_path(vault_key, track)}' "
-                        "WHERE vault_key = ? AND track = ?",
-                        (vault_key, track),
-                    )
-                    state = 'ripped'
-                    conn.commit()
-
-                elif state != 'pending':
-                    log.warning(f"Correcting db for track {vault_key}/{track} {state}->pending")
-                    conn.execute(
-                        "UPDATE tracks SET state = 'pending', "
-                        f"path='{encoded_file_path(vault_key, track)}', wav_path='{wav_file_path(vault_key, track)}' "
-                        "WHERE vault_key = ? AND track = ?",
-                        (vault_key, track),
-                    )
-                    state = 'pending'
-                    conn.commit()
+                if os.path.exists(wav_path):
+                    os.remove(wav_path)
+                log.warning(f"Correcting db for track {vault_key}/{track} {state}->pending")
+                conn.execute(
+                    "UPDATE tracks SET state = 'pending', "
+                    f"path='{encoded_file_path(vault_key, track)}', wav_path='{wav_file_path(vault_key, track)}' "
+                    "WHERE vault_key = ? AND track = ?",
+                    (vault_key, track),
+                )
+                state = 'pending'
+                conn.commit()
 
             if state != 'done':
                 return False

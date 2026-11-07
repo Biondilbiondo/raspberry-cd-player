@@ -348,6 +348,7 @@ class MusicPlayer:
         self._play_track(self.current_track)
 
     def _play_track(self, idx: int):
+        self._stopped = False
         if not self.tracklist:
             return
         idx = max(0, min(idx, len(self.tracklist) - 1))
@@ -454,7 +455,6 @@ class MusicPlayer:
                             self._play_track(self.current_track + 1)
                         elif control == "play_pause":
                             if self._stopped:
-                                self._stopped = False
                                 self._play_track(self.current_track)
                             else:
                                 self.paused = not self.paused
