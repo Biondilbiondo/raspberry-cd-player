@@ -1,0 +1,21 @@
+#cloud-config
+# cloud-init user-data for Raspberry Pi OS — read from the boot partition on first boot.
+# Docs: https://docs.raspberrypi.com/projects/raspberry-pi-os/documentation/initial-setup/cloud-init/
+
+hostname: cdplayer
+
+users:
+  - name: cdplayer
+    gecos: "CD Player"
+    groups: [sudo, audio]          # sudo: package management; audio: access to /dev/snd
+    sudo: ["ALL=(ALL) NOPASSWD:ALL"]
+    shell: /bin/bash
+    lock_passwd: false
+    # SHA-512 hash of the user's password (generated with: openssl passwd -6 <password>)
+    passwd: 
+
+# Update package lists and upgrade all installed packages on first boot.
+# Runs as root; needs the network, so see network-config (wlan0 is marked required).
+runcmd:
+  - [ sh, -c, "apt-get update" ]
+  - [ sh, -c, "DEBIAN_FRONTEND=noninteractive apt-get upgrade -y" ]

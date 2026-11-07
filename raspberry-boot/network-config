@@ -1,0 +1,24 @@
+# Netplan-compatible network configuration, applied by cloud-init on first boot
+# (it is *not* re-applied after the first boot).
+#
+# Reference:
+#   https://netplan.io/reference
+#   https://cloudinit.readthedocs.io/en/latest/topics/network-config-format-v2.html
+#
+# NOTE: YAML indentation is whitespace-sensitive — use spaces, never tabs.
+#
+# wlan0 is marked "optional: false" (required) because user-data runs
+# `apt-get update/upgrade`, which needs the network to be up before cloud-init
+# proceeds. If you would rather boot even when the AP is unreachable, change it
+# to "optional: true".
+
+network:
+  version: 2
+  wifis:
+    wlan0:
+      dhcp4: true
+      optional: false 
+      regulatory-domain: "GB"
+      access-points:
+        "<MYSSID>":
+          password: "<MYPSK>"
