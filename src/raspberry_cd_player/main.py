@@ -26,6 +26,7 @@ from .input_handler import InputHandler, InputEvent, ClickEvent
 from .library_manager import LibraryManager
 from .cd_rip import _rip_chain, _rip_estimated_len_s
 from .paths import wav_file_path, encoded_file_path
+from .qr import editor_url, available as qr_available
 from .database import db_is_cd_complete, db_is_cd_present, db_get_track, db_get_all_keys, db_get_rip_status, db_get_track_state, init_db, db_update_track, db_add_entry
 
 # ── Logging ──────────────────────────────────────────────────────────────────
@@ -72,6 +73,10 @@ class MusicPlayer:
         self.vault_key       = None
         self._stopped        = False
 
+        # QR overlay (link to the web editor of an archived album)
+        self._qr             = None    # {"url", "title", "state"} while the overlay is shown
+        self._can_edit       = False   # current disc is fully archived -> QR button visible
+
         # Progress bar state
         self._playback_pos   = 0.0
         self._playback_dur   = 0.0
@@ -114,6 +119,17 @@ class MusicPlayer:
         db_states = db_get_rip_status(self.vault_key, ntracks)
         # Map: done→archived, ripping/ripped→doing, pending→wait
         return ['archived' if s == 'done' else 'doing' if s in ('ripping', 'ripped') else 'wait' for s in db_states]
+
+    def _open_qr(self, vault_key: str, artist: str, album: str):
+        """Show the QR code that opens this album in the web editor."""
+        if not vault_key:
+            return
+        if not qr_available():
+            self.ui.show_message("QR code unavailable (segno missing)")
+            return
+        url = editor_url(vault_key)
+        log.info("QR overlay for %s", url)
+        self._qr = {"url": url, "title": f"{artist} - {album}", "state": self.state}
 
     def _kill_rip(self):
         """Kill any active cdparanoia/ffmpeg subprocess."""
@@ -329,6 +345,7 @@ class MusicPlayer:
             })
 
         self.source      = "vault"
+        self.vault_key   = vault_key
         self.current_track = 0
         self._start_playback()
         log.info("Vault playback started – %d tracks", len(self.tracklist))
@@ -416,6 +433,11 @@ class MusicPlayer:
     def _handle_input(self, event: Union[InputEvent, ClickEvent]):
         s = self.state
 
+        # ── QR overlay: any tap / button closes it ───────────────────────────
+        if self._qr is not None:
+            self._qr = None
+            return
+
         # ── Mouse Click ──────────────────────────────────────────────────────
         if isinstance(event, ClickEvent):
             cx, cy = self.ui.to_canvas((event.x, event.y))
@@ -425,8 +447,13 @@ class MusicPlayer:
                     self.main_menu_sel = idx
                     self._main_menu_select()
             elif s == State.LIBRARY_BROWSE:
+                qr_idx = self.ui.get_library_qr_at(cx, cy, self.library_albums, self.library_sel)
                 if self.ui.is_back_button_at(cx, cy):
                     self.state = State.MAIN_MENU
+                elif qr_idx is not None:
+                    self.library_sel = qr_idx
+                    album = self.library_albums[qr_idx]
+                    self._open_qr(album["vault_key"], album.get("artist", "?"), album.get("title", "?"))
                 else:
                     idx = self.ui.get_library_album_at(cx, cy, len(self.library_albums), self.library_sel)
                     if idx is not None:
@@ -440,6 +467,9 @@ class MusicPlayer:
                 if self.ui.is_back_button_at(cx, cy):
                     self.player.stop()
                     self.state = self.prev_state or State.MAIN_MENU
+                elif self._can_edit and self.ui.is_qr_button_at(cx, cy):
+                    self._open_qr(self.vault_key, self.album_info.get("artist", "?"),
+                                  self.album_info.get("album", "?"))
                 else:
                     # Compute tracklist Y to match draw_playback
                     bar_y = CTRL_Y + CTRL_RADIUS + 15
@@ -505,6 +535,11 @@ class MusicPlayer:
                         self._play_vault(album["vault_key"])
                     elif hasattr(self, "_load_library_album"):
                         self._load_library_album(album)
+            elif event == InputEvent.RIGHT:
+                if self.library_albums:
+                    album = self.library_albums[self.library_sel]
+                    if "vault_key" in album:
+                        self._open_qr(album["vault_key"], album.get("artist", "?"), album.get("title", "?"))
             elif event == InputEvent.BACK:
                 self.state = State.MAIN_MENU
 
@@ -523,6 +558,10 @@ class MusicPlayer:
 
             elif event == InputEvent.DOWN:
                 self._play_track(self.current_track + 1)
+
+            elif event == InputEvent.RIGHT and self._can_edit:
+                self._open_qr(self.vault_key, self.album_info.get("artist", "?"),
+                              self.album_info.get("album", "?"))
 
             elif event == InputEvent.BACK:
                 self.player.stop()
@@ -607,6 +646,8 @@ class MusicPlayer:
                         self._handle_input(inp)
 
             s = self.state
+            if s != State.PLAYBACK:
+                self._can_edit = False
             if s == State.MAIN_MENU:
                 self.ui.draw_main_menu(self.main_menu_items, self.main_menu_sel)
             elif s == State.LIBRARY_BROWSE:
@@ -630,6 +671,10 @@ class MusicPlayer:
                     ripped_status = self.get_rip_status()
                     current_rip_pos = _rip_estimated_len_s(db_get_track(self.vault_key, self.current_track)['wav_path'])
 
+                # Editor link only for discs that are completely archived
+                self._can_edit = bool(self.vault_key) and bool(ripped_status) \
+                    and all(st == "archived" for st in ripped_status)
+
                 self.ui.draw_playback(
                     album_info    = self.album_info,
                     tracklist     = self.tracklist,
@@ -639,7 +684,14 @@ class MusicPlayer:
                     ripped_pos    = current_rip_pos,
                     ripped_status = ripped_status,
                     duration      = self._playback_dur,
+                    show_qr_button = self._can_edit,
                 )
+
+            if self._qr is not None:
+                if self._qr["state"] != self.state:   # screen changed underneath (e.g. disc removed)
+                    self._qr = None
+                else:
+                    self.ui.draw_qr_overlay(self._qr["url"], self._qr["title"])
 
             self.ui.present()
             clock.tick(30)
@@ -651,7 +703,7 @@ class MusicPlayer:
         log.info("Goodbye.")
 
 def _start_web_editor():
-    """Start the Flask web metadata editor on 0.0.0.0:8080 (LAN-only).
+    """Start the Flask web metadata editor on 0.0.0.0:<[web] port> (LAN-only).
 
     Runs in a daemon thread started from the same process as the player, so the
     web editor comes up at the same time as the player app.
@@ -661,12 +713,12 @@ def _start_web_editor():
 
         t = threading.Thread(
             target=meta_editor.app.run,
-            kwargs={"host": "0.0.0.0", "port": 8080, "debug": False, "use_reloader": False},
+            kwargs={"host": "0.0.0.0", "port": config.web_port, "debug": False, "use_reloader": False},
             daemon=True,
             name="meta-editor",
         )
         t.start()
-        log.info("Web metadata editor starting on http://0.0.0.0:8080")
+        log.info("Web metadata editor starting on http://0.0.0.0:%d", config.web_port)
     except Exception as exc:  # noqa: BLE001
         log.warning("Web metadata editor failed to start: %s", exc)
 

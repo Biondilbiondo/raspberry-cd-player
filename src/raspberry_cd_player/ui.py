@@ -41,6 +41,8 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 import pygame
 
+from .qr import qr_matrix
+
 log = logging.getLogger("ui")
 
 WIDTH = 540
@@ -443,6 +445,24 @@ class UI:
         shadow = pygame.Surface((44, 44), pygame.SRCALPHA)
         self._spr["back"] = back_spr
 
+        # --- QR glyph (edit button on the playback screen, marker in the library) --
+        def qr_glyph(s, k, color, ox=0, oy=0):
+            def finder(x, y):
+                pygame.draw.rect(s, color, ((ox + x) * k, (oy + y) * k, 9 * k, 9 * k),
+                                 int(2.2 * k), border_radius=int(1.2 * k))
+                pygame.draw.rect(s, color, ((ox + x + 3) * k, (oy + y + 3) * k, 3 * k, 3 * k))
+            finder(0, 0); finder(15, 0); finder(0, 15)
+            for x, y in ((15, 15), (19, 15), (23, 15), (15, 19), (21, 19), (17, 23), (23, 23)):
+                pygame.draw.rect(s, color, ((ox + x) * k, (oy + y) * k, 2.4 * k, 2.4 * k))
+
+        def qr_button(s, k):
+            pygame.draw.circle(s, (*C_ACCENT, 255), (22 * k, 22 * k), 20 * k)
+            qr_glyph(s, k, C_BG, 10 - 0.5, 10 - 0.5)
+        self._spr["qr_button"] = _supersample((44, 44), qr_button, fill=(*C_ACCENT, 0))
+        for name, col in (("qr_sel", C_ACCENT), ("qr_idle", C_SUBTEXT)):
+            self._spr[name] = _supersample(
+                (26, 26), lambda s, k, c=col: qr_glyph(s, k, c, 0.5, 0.5), fill=(*col, 0))
+
         # --- Status dots --------------------------------------------------------
         D = 2 * (INDICATOR_R + 4)
         def dot(col, filled: bool, glow: bool, dim: bool = False):
@@ -663,6 +683,14 @@ class UI:
     def is_back_button_at(self, x: int, y: int, bx: int=40-20, by: int=25-20) -> bool:
         return bx <= x <= bx + BACK_BUTTON_RECT.width and by <= y <= by + BACK_BUTTON_RECT.height
 
+    def draw_qr_button(self, x: int, y: int):
+        self.screen.blit(self._spr["qr_button"], (x - 22, y - 22))
+
+    def is_qr_button_at(self, x: int, y: int) -> bool:
+        """Hit area of the QR button (mirror image of the back button)."""
+        bx, by = WIDTH - 40 - 20, 25 - 20
+        return bx <= x <= bx + 40 and by <= y <= by + 40
+
     # -- Loading / message overlays -------------------------------------------
     def show_loading(self, text: str = "Loading..."):
         self._is_loading = True
@@ -745,6 +773,10 @@ class UI:
 
             label_w = WIDTH - 28 - (8 if is_sel else 0)
             lx = 14 + (8 if is_sel else 0)
+            has_qr = bool(album.get("vault_key"))
+            if has_qr:   # archived disc: small "edit" QR marker at the bottom right
+                self.screen.blit(self._spr["qr_sel" if is_sel else "qr_idle"],
+                                 (WIDTH - 14 - 26, y + 26))
             year = album.get("year", "")
             if year:
                 yr_surf = self.font_small.render(str(year), True, C_ACCENT if is_sel else C_SUBTEXT)
@@ -768,6 +800,7 @@ class UI:
         ripped_pos:    float = 0,
         ripped_status: Optional[List] = None,
         duration:      float = 0,
+        show_qr_button: bool = False,
     ):
         self._is_loading = False
         tracklist = tracklist or []
@@ -777,6 +810,8 @@ class UI:
         tint = self._art_tint.get(album_info.get("art_path")) if album_info.get("art_path") else None
         self.screen.blit(self._background(tint, playback=True), (0, 0))
         self.draw_back_button(40, 25)
+        if show_qr_button:
+            self.draw_qr_button(WIDTH - 40, 25)
 
         # Header (kept clear of the back button on long names)
         artist = album_info.get("artist", "Unknown Artist")
@@ -929,6 +964,70 @@ class UI:
                 return i
             y_cursor += item_h
         return None
+
+    def get_library_qr_at(self, x: int, y: int, albums: List[Dict], selected: int) -> Optional[int]:
+        """Index of the archived album whose QR marker is at (x, y), else None."""
+        if not albums or x < WIDTH - 56:
+            return None
+        item_h = 60
+        vis = (HEIGHT - 60) // item_h
+        start_i = max(0, min(selected - vis // 2, len(albums) - vis))
+        y_cursor = 60
+        for i in range(start_i, min(start_i + vis, len(albums))):
+            if albums[i].get("vault_key") and y_cursor + 22 <= y <= y_cursor + item_h - 2:
+                return i
+            y_cursor += item_h
+        return None
+
+    # -- QR overlay -------------------------------------------------------------
+    def _qr_surface(self, url: str, target: int = 380) -> Optional[pygame.Surface]:
+        """White card with the QR code for `url`, integer module size, 4-module quiet zone."""
+        cache = self.__dict__.setdefault("_qr_cache", {})
+        spr = cache.get(url)
+        if spr is not None:
+            return spr
+        rows = qr_matrix(url)
+        if not rows:
+            return None
+        n, quiet = len(rows), 4
+        scale = max(3, target // (n + 2 * quiet))
+        size = (n + 2 * quiet) * scale
+        spr = pygame.Surface((size, size))
+        spr.fill((255, 255, 255))
+        for r, row in enumerate(rows):
+            for c, v in enumerate(row):
+                if v:
+                    spr.fill((0, 0, 0), ((c + quiet) * scale, (r + quiet) * scale, scale, scale))
+        if len(cache) > 8:
+            cache.clear()
+        cache[url] = spr
+        return spr
+
+    def draw_qr_overlay(self, url: Optional[str], title: str, subtitle: str = ""):
+        """Full-screen card over the current screen: QR code of the web-editor page."""
+        self.screen.blit(self._background(), (0, 0))   # opaque: nothing from the screen below shows through
+
+        self._draw_text_centered("Edit this album", self.font_title, 90, C_ACCENT)
+        self._draw_text_centered(title, self.font_subtitle, 140, C_WHITE, WIDTH - 60)
+        if subtitle:
+            self._draw_text_centered(subtitle, self.font_small, 180, C_SUBTEXT, WIDTH - 60)
+
+        qr = self._qr_surface(url) if url else None
+        if qr is not None:
+            x, y = (WIDTH - qr.get_width()) // 2, 230
+            self.screen.blit(self._card(qr.get_width() + 20, qr.get_height() + 20, 14, bar=False),
+                             (x - 10, y - 10))
+            self.screen.blit(qr, (x, y))
+            y += qr.get_height() + 40
+            host = url.split("/disc/")[0]
+            self._draw_text_centered("Scan with your phone", self.font_bold, y, C_TEXT)
+            self._draw_text_centered("(same network as the player)", self.font_small, y + 36, C_SUBTEXT)
+            self._draw_text_centered(host, self.font_normal, y + 76, C_ACCENT, WIDTH - 40)
+        else:
+            self._draw_text_centered("No network address available", self.font_bold, 400, C_TEXT)
+            self._draw_text_centered("Connect the player to your network", self.font_small, 440, C_SUBTEXT)
+
+        self._draw_text_centered("Tap to close", self.font_small, HEIGHT - 60, C_SUBTEXT)
 
     def get_playback_track_at(self, x: int, y: int, tracklist_count: int, bar_y: int = 0) -> Optional[int]:
         if tracklist_count == 0:

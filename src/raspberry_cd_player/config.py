@@ -37,6 +37,8 @@ _DEFAULTS = {
     "musicbrainz.mail":    "none",
     "ffmpeg.options":      "-codec:a flac -compression_level 8 -sample_fmt s16 -ar 44100",
     "ffmpeg.format":       "flac",
+    "web.port":            "8080",
+    "web.public_host":     "",
 }
 
 
@@ -136,6 +138,19 @@ class _Config:
     @property
     def mb_mail(self) -> str:
         return _config_parser.get("musicbrainz", "mail", fallback="none")
+
+    # -- Web editor --
+    @property
+    def web_port(self) -> int:
+        try:
+            return int(_config_parser.get("web", "port", fallback=_DEFAULTS["web.port"]))
+        except ValueError:
+            return int(_DEFAULTS["web.port"])
+
+    @property
+    def web_public_host(self) -> str:
+        """Host/IP shown in the QR code; empty = auto-detect the LAN address."""
+        return _config_parser.get("web", "public_host", fallback="").strip()
 
     # -- FFmpeg --
     @property

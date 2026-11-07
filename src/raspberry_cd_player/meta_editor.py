@@ -606,8 +606,8 @@ def health():
     return {"ok": True}
 
 
-def run(host: str = "0.0.0.0", port: int = 8080):
-    app.run(host=host, port=port, debug=False, use_reloader=False)
+def run(host: str = "0.0.0.0", port: Optional[int] = None):
+    app.run(host=host, port=port or config.web_port, debug=False, use_reloader=False)
 
 
 if __name__ == "__main__":
